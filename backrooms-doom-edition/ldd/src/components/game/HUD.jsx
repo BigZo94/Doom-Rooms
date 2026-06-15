@@ -74,6 +74,27 @@ export default function HUD({ sanity, health, almonds, documented, zoneName, fla
         {camcorder && <div style={{ color: '#7CFC7C', marginTop: 3 }}>{'\u25C9'} CAMERA [C]</div>}
       </div>
 
+      {/* Controls Legend */}
+      <div
+        className="absolute bottom-3 left-3"
+        style={{
+          fontSize: '6px',
+          color: '#c8b560',
+          background: 'rgba(0,0,0,0.55)',
+          padding: '8px',
+          border: '1px solid #504830',
+          lineHeight: 1.8
+        }}
+      >
+  <div>WASD - Move</div>
+  <div>Mouse - Look</div>
+  <div>Shift - Sprint</div>
+  <div>F - Flashlight</div>
+  <div>C - Camcorder</div>
+  <div>E - Drink Almond Water</div>
+  <div>M - Minimap</div>
+</div>
+
       {/* Event message */}
       {message && (
         <div className="absolute bottom-16 left-0 right-0 text-center animate-fade-in-up"

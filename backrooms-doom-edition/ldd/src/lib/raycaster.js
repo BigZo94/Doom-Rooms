@@ -13,7 +13,7 @@ export const MAX_DEPTH = 22;
 
 const TEX = 64;                          // texture size (px)
 const PLANE_LEN = Math.tan(HALF_FOV);    // camera-plane half-length
-const WALL_HEIGHT = 1.8;                  // room height in world units (camera centred).
+const WALL_HEIGHT = 3.6;                  // room height in world units (camera centred).
                                          // walls + floor/ceiling row-distance scale by
                                          // this together, so the wall base stays glued
                                          // to the floor — taller = more oppressive.
