@@ -46,13 +46,13 @@ export default function HUD({ sanity, health, almonds, documented, zoneName, fla
       {/* Top-right: zone + field log */}
       <div className="absolute top-3 right-3 text-right">
         <div style={{ color: '#c8b560', fontSize: 8, letterSpacing: '0.15em', textShadow: '0 0 8px #c8b56088' }}>{zoneName}</div>
-        <div style={{ color: '#504830', fontSize: 5, marginTop: 4, letterSpacing: '0.1em' }}>KILL LOG</div>
+        <div style={{ color: '#504830', fontSize: 5, marginTop: 4, letterSpacing: '0.1em' }}>FIELD LOG</div>
         {docList.length === 0 ? (
-          <div style={{ color: '#3a3420', fontSize: 5, marginTop: 2 }}>— no kills —</div>
+          <div style={{ color: '#3a3420', fontSize: 5, marginTop: 2 }}>— nothing documented —</div>
         ) : (
           docList.map((t) => (
             <div key={t} style={{ color: '#8a7e3e', fontSize: 6, marginTop: 2, letterSpacing: '0.05em' }}>
-              {'\u2620'} {ENTITY_NAMES[t] || t} x{documented[t]}
+              {'\u2713'} {ENTITY_NAMES[t] || t} x{documented[t]}
             </div>
           ))
         )}

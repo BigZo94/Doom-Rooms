@@ -6,14 +6,30 @@ import { ENTITY_PARAMS } from '@/lib/entities';
 import {
   initAudio, resumeAudio, setZoneAudio, updateSpatialAudio, setSanityAudio,
   playStepSound, playPickupSound, playSting, playRecordBeep, stopAudio,
+  setMasterVolume, playGunSound,
 } from '@/lib/audioEngine';
 import HUD from './HUD';
 import Camcorder from './Camcorder';
 import GameOver from './GameOver';
+import SettingsMenu from './SettingsMenu';
 
 const ZONE_NAMES = ['LEVEL 0 \u2014 THE LOBBY', 'HABITABLE ZONE', 'PIPE DREAMS', 'ELECTRICAL STATION', 'ABANDONED OFFICE', 'THE TERROR HOTEL'];
 const MOVE = 0.058, SPRINT = 0.095, TURN = 0.045, PSIZE = 0.26;
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+
+// ---- sanity / health tuning ----
+const SANITY_DRAIN = 1.5;     // %/sec while ANY monster is in your FOV
+const SANITY_REGEN = 2.2;     // %/sec when none are in view (get away -> recover)
+const HEALTH_DRAIN = 6;       // %/sec while sanity is at 0
+const HEALTH_REGEN = 1.2;     // %/sec while sanity is comfortably high
+const HEALTH_REGEN_ABOVE = 50;// sanity must exceed this for health to recover
+
+// ---- weapon (flashlight-gun) ----
+const GUN_DMG = 26;           // per shot; monsters are tanky (hp 120-240)
+const GUN_COST = 5;           // battery % per shot
+const GUN_COOLDOWN = 180;     // ms between shots
+
+const DEFAULT_SETTINGS = { brightness: 1, volume: 0.8, mouseSens: 1, fov: 75, crosshair: true };
 
 function spawnWorld() {
   const world = createChunkManager((Math.random() * 1e9) | 0, { loadRadius: 4, unloadRadius: 6, budgetMs: 2 });
@@ -27,7 +43,12 @@ function spawnWorld() {
 export default function GameEngine({ onBackToTitle }) {
   const canvasRef = useRef(null);
   const gs = useRef(null);
-  if (!gs.current) gs.current = { player: { x: 0.5, y: 0.5, angle: 0 }, world: null, sim: null, keys: {}, running: false, sanity: 100, health: 100, almonds: 0, battery: 100, flashlight: false, camcorder: false, showMinimap: false, stepTimer: 0, px: 0, py: 0, msg: '', msgUntil: 0 };
+  if (!gs.current) gs.current = {
+    player: { x: 0.5, y: 0.5, angle: 0 }, world: null, sim: null, keys: {}, running: false,
+    sanity: 100, health: 100, almonds: 0, battery: 100, flashlight: false, camcorder: false,
+    showMinimap: false, stepTimer: 0, px: 0, py: 0, msg: '', msgUntil: 0,
+    gunTimer: 0, muzzle: 0, hitFlash: 0, paused: false, settings: { ...DEFAULT_SETTINGS },
+  };
 
   const [ui, setUi] = useState({ sanity: 100, health: 100, almonds: 0, battery: 100, documented: {}, zone: ZONE_NAMES[0], message: '' });
   const [flashlight, setFlashlight] = useState(false);
@@ -35,6 +56,8 @@ export default function GameEngine({ onBackToTitle }) {
   const [, setShowMinimap] = useState(false);
   const [recInfo, setRecInfo] = useState(null);
   const [phase, setPhase] = useState('playing');
+  const [paused, setPaused] = useState(false);
+  const [settings, setSettings] = useState({ ...DEFAULT_SETTINGS });
   const [deathCause, setDeathCause] = useState(null);
   const rafRef = useRef(null);
   const uiAccum = useRef(0);
@@ -49,6 +72,28 @@ export default function GameEngine({ onBackToTitle }) {
     g.sanity = 100; g.health = 100; g.almonds = 0; g.battery = 100;
   }, []);
 
+  // fire the flashlight-gun (uses battery as ammo)
+  const fire = () => {
+    const g = gs.current;
+    if (g.paused || !g.sim) return;
+    const now = performance.now();
+    if (now - g.gunTimer < GUN_COOLDOWN) return;
+    if (g.battery <= 0) { g.msg = 'BATTERY DEAD'; g.msgUntil = now + 1200; return; }
+    g.gunTimer = now;
+    g.battery = Math.max(0, g.battery - GUN_COST);
+    g.muzzle = now + 70;                       // brief muzzle flash
+    const hitRec = g.sim.damageAlongAim(g.player, GUN_DMG);
+    playGunSound(!!hitRec);
+    if (hitRec) {
+      g.hitFlash = now + 90;
+      if (hitRec.killedNow) {
+        g.msg = 'KILLED: ' + hitRec.type.toUpperCase();
+        g.msgUntil = now + 1800;
+        playSting(hitRec.type);
+      }
+    }
+  };
+
   // main loop
   useEffect(() => {
     if (phase !== 'playing') return;
@@ -62,6 +107,10 @@ export default function GameEngine({ onBackToTitle }) {
     const loop = (now) => {
       if (!g.running) return;
       const dt = Math.min(now - last, 50); last = now;
+
+      // paused: keep rendering the frozen frame but skip simulation
+      if (g.paused) { rafRef.current = requestAnimationFrame(loop); return; }
+
       const p = g.player, keys = g.keys, world = g.world;
 
       // ---- movement ----
@@ -88,21 +137,34 @@ export default function GameEngine({ onBackToTitle }) {
       world.update(p.x, p.y, vx, vy);
       const recording = g.camcorder && g.battery > 0;
       g.sim.update(dt, p, { flashlight: g.flashlight, recording, moving, sanity: g.sanity }, {
-        onContact: ({ health = 0, sanity = 0 }) => { g.health -= health; g.sanity -= sanity; },
-        onDocument: (type) => { g.sanity = Math.min(100, g.sanity + 18); g.msg = 'DOCUMENTED: ' + type.toUpperCase(); g.msgUntil = now + 2600; playSting(type); },
+        onKill: () => {},
         onAlert: () => {},
       });
 
-      // ---- sanity dynamics, pickups, battery ----
-      if (world.isSafeRoom(Math.floor(p.x), Math.floor(p.y))) g.sanity += 0.06 * dt / 16;
+      // ---- sanity: drains ONLY while a monster is in your FOV; regenerates
+      //      on its own once nothing is visible. ----
+      let monsterInView = false;
+      for (const e of g.sim.physical) { if (e.visible) { monsterInView = true; break; } }
+      const sec = dt / 1000;
+      if (monsterInView) g.sanity -= SANITY_DRAIN * sec;
+      else g.sanity += SANITY_REGEN * sec;
+      g.sanity = clamp(g.sanity, 0, 100);
+
+      // ---- health: drains ONLY when sanity has bottomed out; slowly recovers
+      //      when sanity is comfortably high. ----
+      if (g.sanity <= 0) g.health -= HEALTH_DRAIN * sec;
+      else if (g.sanity > HEALTH_REGEN_ABOVE) g.health = Math.min(100, g.health + HEALTH_REGEN * sec);
+      g.health = clamp(g.health, 0, 100);
+
+      // ---- pickups, battery ----
       for (const a of world.almondsNear(p.x, p.y, 4)) {
         if (Math.hypot(a.x - p.x, a.y - p.y) < 0.6) { world.takeItem(a.id); g.almonds++; g.msg = 'ALMOND WATER ACQUIRED'; g.msgUntil = now + 2000; playPickupSound(); }
       }
-      if (recording) g.battery = Math.max(0, g.battery - dt * 0.004); else g.battery = Math.min(100, g.battery + dt * 0.0016);
+      // battery: drains while recording; the gun also spends it; recharges slowly when idle
+      if (recording) g.battery = Math.max(0, g.battery - dt * 0.004);
+      else g.battery = Math.min(100, g.battery + dt * 0.0016);
 
-      g.sanity = clamp(g.sanity, 0, 100); g.health = clamp(g.health, 0, 100);
       if (g.health <= 0) { endGame('caught'); return; }
-      if (g.sanity <= 0) { endGame('lost'); return; }
 
       // ---- audio + render ----
       const zone = world.zoneAt(Math.floor(p.x), Math.floor(p.y));
@@ -111,7 +173,9 @@ export default function GameEngine({ onBackToTitle }) {
       const canvas = canvasRef.current;
       if (canvas) {
         const ctx = canvas.getContext('2d');
-        castRays(ctx, world, p, zone, 100 - g.sanity, g.sim.physical, g.flashlight, recording);
+        castRays(ctx, world, p, zone, 100 - g.sanity, g.sim.physical, g.flashlight, recording, {
+          muzzle: now < g.muzzle, hitFlash: now < g.hitFlash,
+        });
         if (g.showMinimap) renderMinimap(ctx, world, p, g.sim.physical);
       }
 
@@ -120,10 +184,7 @@ export default function GameEngine({ onBackToTitle }) {
       if (uiAccum.current > 120) {
         uiAccum.current = 0;
         setSanityAudio(g.sanity);
-        let rt = null, best = 0;
-        for (const e of g.sim.physical) { if ((e.capture || 0) > best) { best = e.capture; rt = e; } }
-        setRecInfo(g.camcorder && rt ? { type: rt.type, progress: Math.min(1, rt.capture / (ENTITY_PARAMS[rt.type].record || 3)) } : null);
-        setUi({ sanity: g.sanity, health: g.health, almonds: g.almonds, battery: g.battery, documented: { ...g.sim.documented }, zone: ZONE_NAMES[zone] || 'THE BACKROOMS', message: now < g.msgUntil ? g.msg : '' });
+        setUi({ sanity: g.sanity, health: g.health, almonds: g.almonds, battery: g.battery, documented: { ...g.sim.killed }, zone: ZONE_NAMES[zone] || 'THE BACKROOMS', message: now < g.msgUntil ? g.msg : '' });
       }
       rafRef.current = requestAnimationFrame(loop);
     };
@@ -136,7 +197,10 @@ export default function GameEngine({ onBackToTitle }) {
     const g = gs.current;
     const down = (e) => {
       const k = e.key.toLowerCase();
-      g.keys[k] = true; initAudio(); resumeAudio();
+      initAudio(); resumeAudio(); setMasterVolume(g.settings.volume);
+      if (k === 'escape') { togglePause(); return; }
+      if (g.paused) return;                    // ignore gameplay keys while paused
+      g.keys[k] = true;
       if (k === 'm') { g.showMinimap = !g.showMinimap; setShowMinimap(g.showMinimap); }
       if (k === 'f') { g.flashlight = !g.flashlight; setFlashlight(g.flashlight); }
       if (k === 'c') { g.camcorder = !g.camcorder; setCamcorder(g.camcorder); playRecordBeep(g.camcorder); }
@@ -148,16 +212,37 @@ export default function GameEngine({ onBackToTitle }) {
     return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); };
   }, []);
 
-  // mouse look
+  // mouse look + fire
   useEffect(() => {
     const canvas = canvasRef.current; if (!canvas) return;
-    const mm = (e) => { if (document.pointerLockElement === canvas) gs.current.player.angle += e.movementX * 0.003; };
-    const click = () => canvas.requestPointerLock();
-    canvas.addEventListener('click', click); document.addEventListener('mousemove', mm);
-    return () => { canvas.removeEventListener('click', click); document.removeEventListener('mousemove', mm); };
+    const g = gs.current;
+    const mm = (e) => { if (document.pointerLockElement === canvas && !g.paused) g.player.angle += e.movementX * 0.003 * g.settings.mouseSens; };
+    const mdown = (e) => {
+      if (g.paused) return;
+      if (document.pointerLockElement !== canvas) { canvas.requestPointerLock(); return; }
+      if (e.button === 0) fire();
+    };
+    canvas.addEventListener('mousedown', mdown);
+    document.addEventListener('mousemove', mm);
+    return () => { canvas.removeEventListener('mousedown', mdown); document.removeEventListener('mousemove', mm); };
   }, [phase]);
 
   useEffect(() => () => stopAudio(), []);
+
+  const togglePause = () => {
+    const g = gs.current;
+    g.paused = !g.paused;
+    setPaused(g.paused);
+    if (g.paused) { if (document.pointerLockElement) document.exitPointerLock(); }
+    else { for (const k in g.keys) g.keys[k] = false; }   // clear stuck keys on resume
+  };
+
+  const changeSetting = (key, value) => {
+    const g = gs.current;
+    g.settings = { ...g.settings, [key]: value };
+    setSettings(g.settings);
+    if (key === 'volume') setMasterVolume(value);
+  };
 
   const restart = () => {
     const g = gs.current;
@@ -165,15 +250,19 @@ export default function GameEngine({ onBackToTitle }) {
     g.world = world; g.sim = sim;
     g.player = { x: sx + 0.5, y: sy + 0.5, angle: Math.random() * 6.28 }; g.px = g.player.x; g.py = g.player.y;
     g.sanity = 100; g.health = 100; g.almonds = 0; g.battery = 100; g.msg = ''; g.msgUntil = 0;
+    g.paused = false; setPaused(false);
     setDeathCause(null); setRecInfo(null); setPhase('playing');
   };
 
-  const sanityFilter = ui.sanity < 50 ? `saturate(${(0.3 + ui.sanity / 100).toFixed(2)}) contrast(1.15) brightness(0.95)` : 'none';
+  // brightness multiplies the sanity colour filter
+  const b = settings.brightness;
+  const baseFilter = ui.sanity < 50 ? `saturate(${(0.3 + ui.sanity / 100).toFixed(2)}) contrast(1.15)` : '';
+  const sanityFilter = `${baseFilter} brightness(${b.toFixed(2)})`.trim();
 
   return (
     <div className="relative w-full h-full overflow-hidden" style={{ background: '#000' }}>
       <canvas ref={canvasRef} width={SCREEN_WIDTH} height={SCREEN_HEIGHT} className="absolute"
-        style={{ top: 0, left: 0, width: '100%', height: '100%', imageRendering: 'pixelated', cursor: phase === 'playing' ? 'none' : 'default', filter: sanityFilter, transition: 'filter 0.4s' }} />
+        style={{ top: 0, left: 0, width: '100%', height: '100%', imageRendering: 'pixelated', cursor: phase === 'playing' && !paused ? 'none' : 'default', filter: sanityFilter, transition: 'filter 0.4s' }} />
 
       <div className="absolute inset-0 pointer-events-none z-10" style={{ background: 'repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(0,0,0,0.12) 3px, rgba(0,0,0,0.12) 4px)' }} />
       <div className="absolute inset-0 pointer-events-none z-10" style={{ background: 'radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.75) 100%)' }} />
@@ -181,23 +270,43 @@ export default function GameEngine({ onBackToTitle }) {
         <div className="absolute inset-0 pointer-events-none z-10" style={{ background: 'radial-gradient(ellipse at center, transparent 45%, rgba(120,0,0,0.45) 100%)', opacity: (45 - ui.sanity) / 45, animation: ui.sanity < 20 ? 'pulse-red 1.4s infinite' : 'none' }} />
       )}
 
+      {/* crosshair */}
+      {phase === 'playing' && !paused && settings.crosshair && (
+        <div className="absolute inset-0 pointer-events-none z-20 flex items-center justify-center">
+          <div style={{ position: 'relative', width: 18, height: 18, opacity: 0.8 }}>
+            <div style={{ position: 'absolute', left: '50%', top: 0, width: 2, height: 6, marginLeft: -1, background: '#d8ffd8' }} />
+            <div style={{ position: 'absolute', left: '50%', bottom: 0, width: 2, height: 6, marginLeft: -1, background: '#d8ffd8' }} />
+            <div style={{ position: 'absolute', top: '50%', left: 0, height: 2, width: 6, marginTop: -1, background: '#d8ffd8' }} />
+            <div style={{ position: 'absolute', top: '50%', right: 0, height: 2, width: 6, marginTop: -1, background: '#d8ffd8' }} />
+          </div>
+        </div>
+      )}
+
       {phase === 'playing' && (
         <HUD sanity={ui.sanity} health={ui.health} almonds={ui.almonds} documented={ui.documented} zoneName={ui.zone} flashlight={flashlight} camcorder={camcorder} message={ui.message} />
       )}
       {phase === 'playing' && camcorder && <Camcorder battery={ui.battery} recInfo={recInfo} />}
 
-      {phase === 'playing' && (
+      {phase === 'playing' && !paused && (
         <div className="absolute bottom-2 right-3 font-pixel pointer-events-none z-20" style={{ fontSize: '5px', color: '#302810', letterSpacing: '0.1em', lineHeight: 2 }}>
-          WASD MOVE · SHIFT RUN · MOUSE LOOK · F LIGHT · C CAMERA · E DRINK · M MAP
+          WASD MOVE &middot; SHIFT RUN &middot; CLICK FIRE &middot; F LIGHT &middot; C CAMERA &middot; E DRINK &middot; M MAP &middot; ESC MENU
         </div>
+      )}
+
+      {phase === 'playing' && paused && (
+        <SettingsMenu
+          settings={settings}
+          onChange={changeSetting}
+          onResume={togglePause}
+          onQuit={() => { stopAudio(); onBackToTitle && onBackToTitle(); }} />
       )}
 
       {phase === 'over' && (
         <GameOver
           deathText={deathCause === 'caught'
-            ? 'Something reached you in the dark. The hum swallowed the sound, and the rooms went on without you.'
+            ? 'Your body gave out. The rooms drank the last of your warmth and went on without you.'
             : 'Your mind came apart like wet wallpaper. You lost track of which corridor was which, and then of which one was you.'}
-          statLabel="ENTITIES DOCUMENTED"
+          statLabel="ENTITIES KILLED"
           statValue={Object.values(ui.documented).reduce((a, b) => a + b, 0)}
           onRestart={restart} />
       )}

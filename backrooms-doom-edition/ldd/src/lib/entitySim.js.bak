@@ -19,7 +19,7 @@
 //  stays bounded while the world feels continuously inhabited.
 // ============================================================================
 
-import { ENTITY_PARAMS, makeSteer, stepActive, damageEntity, hasLOS } from './entities.js';
+import { ENTITY_PARAMS, makeSteer, stepActive } from './entities.js';
 
 const R1 = 18;      // active radius (cells)
 const R2 = 42;      // dormant radius
@@ -40,7 +40,7 @@ const f01 = (h) => (h >>> 8) / 16777216;
 export function createEntitySim(world, opts = {}) {
   const maxActive = opts.maxActive || 5;
   const records = [];
-  const killed = {};
+  const documented = {};
   let _id = 1, clock = 0, spawnCd = 1500;
   let dormantAccum = 0;
   const steer = makeSteer(world);
@@ -126,7 +126,7 @@ export function createEntitySim(world, opts = {}) {
     }
   }
 
-  // dt ms. ctx {flashlight,recording,moving,sanity}. cb {onKill,onAlert}
+  // dt ms. ctx {flashlight,recording,moving,sanity}. cb {onContact,onDocument,onAlert}
   function update(dt, player, ctx, cb) {
     clock += dt;
 
@@ -167,7 +167,7 @@ export function createEntitySim(world, opts = {}) {
         if (!wasActive && r._tier === 'abstract') fastForward(r, player);
         r._active = true; r._tier = 'active'; tierCounts.active++;
         const status = stepActive(world, r, player, ctx, cb, steer, dt);
-        if (status === 'killed') { killed[r.type] = (killed[r.type] || 0) + 1; cb.onKill && cb.onKill(r.type, r); records.splice(i, 1); }
+        if (status === 'documented') { documented[r.type] = (documented[r.type] || 0) + 1; cb.onDocument && cb.onDocument(r.type); records.splice(i, 1); }
         else if (status === 'despawn') { records.splice(i, 1); }
       } else if (r.dist <= R2) {
         // DORMANT: cheap drift at low rate; clear transient active fields
@@ -183,40 +183,12 @@ export function createEntitySim(world, opts = {}) {
     }
   }
 
-  // Fire the weapon: find the active entity best aligned with the player's
-  // aim (within `cone`, with line of sight) and deal `dmg` to it. Returns the
-  // hit record (with a .killedNow flag) or null if nothing was in the beam.
-  function damageAlongAim(player, dmg, cone = 0.9, range = 22) {
-    const fx = Math.cos(player.angle), fy = Math.sin(player.angle);
-    let best = null, bestDot = cone;
-    for (const r of records) {
-      if (r._tier !== 'active') continue;
-      const dx = r.x - player.x, dy = r.y - player.y;
-      const d = Math.hypot(dx, dy) || 1e-6;
-      if (d > range) continue;
-      const dot = (dx / d) * fx + (dy / d) * fy;
-      if (dot < bestDot) continue;
-      if (!hasLOS(world, player.x, player.y, r.x, r.y)) continue;
-      best = r; bestDot = dot;
-    }
-    if (!best) return null;
-    // closer = more aligned damage; falloff is gentle so it stays usable
-    const kn = damageEntity(best, dmg);
-    best.killedNow = kn;
-    if (kn) {
-      killed[best.type] = (killed[best.type] || 0) + 1;
-      const i = records.indexOf(best);
-      if (i >= 0) records.splice(i, 1);
-    }
-    return best;
-  }
-
   return {
-    update, damageAlongAim,
+    update,
     get physical() { return records.filter((r) => r._tier === 'active'); },
-    records, killed, documented: killed, tierCounts,
+    records, documented, tierCounts,
     get count() { return records.length; },
     stats() { return { total: records.length, ...tierCounts }; },
-    reset() { records.length = 0; for (const k in killed) delete killed[k]; clock = 0; spawnCd = 1500; },
+    reset() { records.length = 0; for (const k in documented) delete documented[k]; clock = 0; spawnCd = 1500; },
   };
 }

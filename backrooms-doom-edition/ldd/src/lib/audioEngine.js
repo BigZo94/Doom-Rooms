@@ -454,6 +454,46 @@ function musicLoop() {
   musicTimer = setTimeout(() => { if (musicOn && Math.random() < 0.6) musicNote(); musicLoop(); }, 2600 + Math.random() * 4200);
 }
 
+// ---------- settings / weapon ----------
+// Master volume 0..1 (scaled into the engine's internal headroom).
+export function setMasterVolume(v) {
+  if (!ctx || !master) return;
+  const vol = Math.max(0, Math.min(1, v));
+  ramp(master.gain, 0.5 * vol, 0.1);
+}
+
+// Flashlight-gun discharge: an electrical zap/crack + a short sub thump, with
+// a tiny pitch-randomized tail so repeats don't sound identical.
+export function playGunSound(hit = false) {
+  if (!ctx) return;
+  try {
+    const now = T();
+    // crack: short bright noise burst, highpass-ish via bandpass
+    const ng = ctx.createGain();
+    ng.gain.setValueAtTime(0.22, now); ng.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
+    const ns = ctx.createBufferSource(); ns.buffer = noiseBuffer(0.16);
+    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 1.2;
+    bp.frequency.setValueAtTime(3200 + Math.random() * 800, now);
+    bp.frequency.exponentialRampToValueAtTime(1200, now + 0.16);
+    ns.connect(bp); bp.connect(ng); spawnToRoom(ng, 0.5); ns.start(now); ns.stop(now + 0.17);
+    // body: a short electric tone sweep
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.16, now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+    const o = ctx.createOscillator(); o.type = 'square';
+    o.frequency.setValueAtTime(420 + Math.random() * 80, now); o.frequency.exponentialRampToValueAtTime(90, now + 0.16);
+    o.connect(g); spawnToRoom(g, 0.3); o.start(now); o.stop(now + 0.19);
+    // hit confirm: a short metallic ring layered on top
+    if (hit) {
+      const hg = ctx.createGain();
+      hg.gain.setValueAtTime(0.12, now + 0.01); hg.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+      const ho = ctx.createOscillator(); ho.type = 'triangle'; ho.frequency.value = 1800;
+      const ho2 = ctx.createOscillator(); ho2.type = 'triangle'; ho2.frequency.value = 1800 * 1.48;
+      ho.connect(hg); ho2.connect(hg); spawnToRoom(hg, 0.7);
+      ho.start(now); ho.stop(now + 0.42); ho2.start(now); ho2.stop(now + 0.42);
+    }
+  } catch (e) {}
+}
+
 export function resumeAudio() { if (ctx && ctx.state === 'suspended') ctx.resume(); }
 export function stopAudio() {
   try {

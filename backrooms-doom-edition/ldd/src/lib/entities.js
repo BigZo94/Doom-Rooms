@@ -16,10 +16,10 @@
 // ============================================================================
 
 export const ENTITY_PARAMS = {
-  wanderer: { speed: 0.014, sense: 6,  sanityNear: 5,  contactSanity: 4,  contactHealth: 0,  record: 2.0, despawn: 20 },
-  watcher:  { speed: 0.030, sense: 16, sanityNear: 9,  contactSanity: 20, contactHealth: 0,  record: 2.6, despawn: 28, freezeWhenWatched: true },
-  smiler:   { speed: 0.024, sense: 13, sanityNear: 15, contactSanity: 12, contactHealth: 6,  record: 3.2, despawn: 26, lightAverse: true },
-  hound:    { speed: 0.052, sense: 12, sanityNear: 7,  contactSanity: 6,  contactHealth: 16, record: 4.2, despawn: 32, chaser: true },
+  wanderer: { speed: 0.014, sense: 6,  hp: 120, despawn: 20 },
+  watcher:  { speed: 0.030, sense: 16, hp: 200, despawn: 28, freezeWhenWatched: true },
+  smiler:   { speed: 0.024, sense: 13, hp: 160, despawn: 26, lightAverse: true },
+  hound:    { speed: 0.052, sense: 12, hp: 240, despawn: 32, chaser: true },
 };
 
 const HALF_VIEW = 0.62;          // ~35°, "is it on screen / am I looking at it"
@@ -87,7 +87,12 @@ export function makeSteer(world) {
 
 // FULL-FIDELITY (Tier 1) update for ONE entity. Pure per-entity logic — the
 // caller owns the list, so this is reused by both the simple manager and the
-// tiered streaming simulation. Returns 'documented' | 'despawn' | null.
+// tiered streaming simulation. Returns 'killed' | 'despawn' | null.
+//
+// Sanity/health are NO LONGER drained here. The engine now drains sanity
+// centrally based on whether ANY monster is in the player's FOV (and converts
+// 0-sanity into health loss), so this function's only player-facing outputs
+// are: marking e.visible (for the FOV check) and reacting to damage.
 export function stepActive(world, e, player, ctx, cb, steer, dt) {
   const k = dt / 16;
   const P = ENTITY_PARAMS[e.type];
@@ -99,7 +104,11 @@ export function stepActive(world, e, player, ctx, cb, steer, dt) {
   const onScreen = dot > HALF_VIEW && los;
   e.visible = onScreen;
   const ndx = dx / dist, ndy = dy / dist;
-  const framed = ctx.recording && dot > 0.80 && los && dist < 14;
+
+  // ensure HP exists (records created elsewhere may predate this field)
+  if (e.hp === undefined) e.hp = P.hp || 100;
+  if (e.hurt === undefined) e.hurt = 0;
+  if (e.hurt > 0) e.hurt = Math.max(0, e.hurt - dt);          // hit-flash timer
 
   let move = 0, ax = ndx, ay = ndy;
   if (e.type === 'wanderer') {
@@ -132,41 +141,26 @@ export function stepActive(world, e, player, ctx, cb, steer, dt) {
     if (dist < 6 && cb.onAlert) cb.onAlert('hound', dist);
   }
 
-  if (framed) move *= 0.3;
+  // a freshly-hit monster recoils briefly (knocked back, staggered)
+  if (e.hurt > 0) move *= 0.35;
+
   if (move > 0 && !e.frozen) {
     const used = steer(e, ax, ay, move, k);
     if (e.type === 'wanderer' || e.type === 'hound') e.wanderA = used;
   }
 
-  // Sanity drain: an entity only frays you when you can SEE it (on screen,
-  // line-of-sight) or when it is right on top of you (a felt presence in the
-  // dark). Distant off-screen entities no longer bleed sanity — that read as
-  // "getting hurt for no reason".
-  const PERSONAL = 4;                      // cells: "I can feel it near me"
-  if (onScreen || dist < PERSONAL) {
-    // base falloff over sense range, but only counts inside the gate above
-    let drain = P.sanityNear * (1 - dist / P.sense);
-    if (drain < 0) drain = 0;
-    if (!onScreen) drain *= 0.5;           // unseen-but-close: half effect
-    if (e.type === 'smiler' && onScreen) drain *= 2.2;
-    if (e.type === 'watcher' && onScreen) drain *= 0.4;
-    if (drain > 0) cb.onContact && cb.onContact({ type: e.type, sanity: drain * k * 0.05, health: 0 });
-  }
-  if (dist < 0.6) {
-    cb.onContact && cb.onContact({ type: e.type, health: P.contactHealth * k * 0.08, sanity: P.contactSanity * k * 0.08 });
-    if (e.type === 'watcher' || e.type === 'wanderer') {
-      const np = world.openCellNear(Math.round(e.x), Math.round(e.y), 12, 6);
-      e.x = np.x; e.y = np.y; e.capture = 0;
-    }
-  }
-  if (framed) {
-    e.capture = (e.capture || 0) + dt / 1000;
-    if (e.capture >= P.record) return 'documented';
-  } else if (e.capture > 0) {
-    e.capture = Math.max(0, e.capture - dt / 1500);
-  }
   if (dist > P.despawn && !onScreen) return 'despawn';
   return null;
+}
+
+// Apply weapon damage to an entity. Returns true if this killed it.
+// Tanky by design: see ENTITY_PARAMS.hp. Caller handles removal + fx.
+export function damageEntity(e, amount) {
+  const P = ENTITY_PARAMS[e.type] || {};
+  if (e.hp === undefined) e.hp = P.hp || 100;
+  e.hp -= amount;
+  e.hurt = 220;                 // ms of hit-flash / recoil
+  return e.hp <= 0;
 }
 
 let _id = 1;
@@ -207,7 +201,7 @@ export function createEntityManager(world, opts = {}) {
     if (spawnCooldown <= 0) { trySpawn(player, ctx.sanity); spawnCooldown = 2600 + Math.random() * 3000 - (100 - ctx.sanity) * 14; }
     for (let i = list.length - 1; i >= 0; i--) {
       const r = stepActive(world, list[i], player, ctx, cb, steer, dt);
-      if (r === 'documented') { const t = list[i].type; documented[t] = (documented[t] || 0) + 1; cb.onDocument && cb.onDocument(t); list.splice(i, 1); }
+      if (r === 'killed') { const t = list[i].type; documented[t] = (documented[t] || 0) + 1; cb.onKill && cb.onKill(t); list.splice(i, 1); }
       else if (r === 'despawn') list.splice(i, 1);
     }
   }

@@ -528,7 +528,7 @@ function cellVariant(mx, my) {
   return 3;               // heavy water stain
 }
 
-export function castRays(ctx, world, player, zoneIndex, dread, entities, flashlight = false, camcorder = false) {
+export function castRays(ctx, world, player, zoneIndex, dread, entities, flashlight = false, camcorder = false, fx = null) {
   _tick++;
   const W = SCREEN_WIDTH, H = SCREEN_HEIGHT, halfH = H >> 1;
   const p = getPalette(zoneIndex);
@@ -754,6 +754,21 @@ export function castRays(ctx, world, player, zoneIndex, dread, entities, flashli
     ctx.fillStyle = 'rgba(0,0,0,' + ((1 - flick) * 0.5).toFixed(3) + ')';
     ctx.fillRect(0, 0, W, H);
   }
+
+  // ---- weapon feedback ----
+  if (fx) {
+    if (fx.muzzle) {
+      // a brief warm flash blooming from the lower-centre (the gun)
+      const grad = ctx.createRadialGradient(W * 0.5, H * 0.74, 0, W * 0.5, H * 0.74, H * 0.6);
+      grad.addColorStop(0, 'rgba(255,236,180,0.55)');
+      grad.addColorStop(1, 'rgba(255,236,180,0)');
+      ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
+    }
+    if (fx.hitFlash) {
+      ctx.fillStyle = 'rgba(180,20,20,0.22)';
+      ctx.fillRect(0, 0, W, H);
+    }
+  }
 }
 
 function drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, ents, zBuf, dread, flick, ambient = 1, useFlash = false, flashBoost = 1, fcx = W * 0.5, fcy = H * 0.55) {
@@ -795,6 +810,7 @@ function drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, ents, z
       shade *= ambient;
     }
     const aggro = e.type === 'hound' || dr > 0.5;
+    const hurt = (e.hurt || 0) > 0;            // recently shot -> flash red-white
 
     for (let stripe = 0; stripe < sW; stripe++) {
       const x = drawStartX + stripe;
@@ -810,6 +826,7 @@ function drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, ents, z
         if (sa === 0) continue;
         let r = (sp & 0xFF) * shade, g = ((sp >> 8) & 0xFF) * shade, b = ((sp >> 16) & 0xFF) * shade;
         if (aggro) { r += 26 * (e.type === 'hound' ? 1 : dr); }
+        if (hurt) { r = r * 0.5 + 230; g = g * 0.5 + 60; b = b * 0.5 + 40; }   // damage flash
         if (sa >= 250) {
           buf[y * W + x] = pack(r, g, b, 255);
         } else {
