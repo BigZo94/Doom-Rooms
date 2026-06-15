@@ -1,26 +1,38 @@
 // ============================================================================
-//  Web Audio soundscape for the Backrooms.
+//  Web Audio soundscape for the Backrooms — horror-tuned.
 //
-//  Layers:
-//    - a persistent fluorescent hum + sub drone (the ever-present buzz)
-//    - per-ZONE ambient beds that crossfade as you cross regions, plus sparse
-//      generative "music" (a detuned, dissonant music-box) in some zones
-//    - SPATIAL entity audio: each threat drives a stereo-panned, distance-
-//      attenuated voice (a hound growl from your left, a smiler's whine ahead)
-//    - low-SANITY whispers that swell as you come apart
-//  Everything is generated — no audio files. All calls are guarded so the game
-//  runs fine if Web Audio is unavailable.
+//  Design philosophy: fear comes from SPACE and UNPREDICTABILITY, not from a
+//  loud constant tone. So instead of a bright buzzing fixture stack (which read
+//  as a motor / "vibrator"), the bed here is:
+//
+//    - a deep, heavily low-passed room rumble you FEEL more than hear
+//    - a faint broadband "air" bed (huge empty space) with a slow swell
+//    - everything sent through a cold generated REVERB so nothing is dry/close
+//    - the fluorescents reduced to an occasional, irregular, distant tick/buzz
+//      rather than a sustained drone
+//    - entity voices rebuilt from filtered NOISE and INHARMONIC tones (breath,
+//      growl, metallic shimmer) — organic and wrong, not clean synth notes
+//    - irregular event scares: distant impacts/groans, dissonant swells that
+//      rise only when something is genuinely near, rare sub-bass drops
+//
+//  Everything is generated — no audio files. All calls are guarded.
+//  Public API is unchanged so the game keeps working.
 // ============================================================================
 
 let ctx = null, master = null, initialized = false;
-let humGain, humNode, droneNode;
-let threatGain, threatPan, threatFilter;        // hound-ish growl channel
-let presGain, presPan, presOsc, presOsc2;       // generic presence channel
-let whisperGain;                                 // low-sanity whispers
-let musicGain;                                   // zone music bus
-let dripTimer = null, musicTimer = null;
+let busDry, busWet, reverb;                      // routing
+let humGain, humNode, droneNode;                 // (names kept for compatibility)
+let airGain, airFilter;                          // broadband room air
+let threatGain, threatPan, threatFilter;         // hound growl channel
+let presGain, presPan, presOsc, presOsc2, presFilter; // presence shimmer
+let breathGain, breathFilter;                    // presence breath (noise)
+let whisperGain;
+let musicGain;
+let swellGain, swellOsc, swellOsc2;              // dissonant "something's near" riser
+let dripTimer = null, musicTimer = null, fixtureTimer = null, scareTimer = null;
 let curZone = -1, musicOn = false, dripRate = 5200;
 let stepAccum = 0;
+let nearAmount = 0;                              // 0..1 how close the nearest threat is
 
 function noiseBuffer(seconds = 2) {
   const n = Math.floor((ctx.sampleRate || 44100) * seconds);
@@ -34,181 +46,245 @@ function loopNoise() {
   s.buffer = noiseBuffer(2.2); s.loop = true; return s;
 }
 
+// A cold, long, slightly metallic impulse response built from decaying noise.
+// Gives the whole mix the sense of a large, hard-surfaced empty space.
+function makeReverbIR(seconds = 3.4, decay = 3.2) {
+  const rate = ctx.sampleRate || 44100;
+  const len = Math.floor(rate * seconds);
+  const ir = ctx.createBuffer(2, len, rate);
+  for (let ch = 0; ch < 2; ch++) {
+    const d = ir.getChannelData(ch);
+    for (let i = 0; i < len; i++) {
+      const t = i / len;
+      // sparse early reflections + exponential noise tail
+      const env = Math.pow(1 - t, decay);
+      let s = (Math.random() * 2 - 1) * env;
+      // a few discrete early echoes for "hard room" character
+      if (i === (rate * 0.013 | 0) || i === (rate * 0.029 | 0) || i === (rate * 0.051 | 0)) s += (ch ? -0.5 : 0.5);
+      d[i] = s;
+    }
+  }
+  return ir;
+}
+
 export function initAudio() {
   if (initialized) return;
   try {
     ctx = new (window.AudioContext || window.webkitAudioContext)();
-    master = ctx.createGain(); master.gain.value = 0.42; master.connect(ctx.destination);
 
-    // ---- persistent fluorescent-fixture ambience + sub drone ----
-    //  Real fluorescent tubes don't sing one clean note: they buzz at the
-    //  mains fundamental (~60Hz here) plus strong even harmonics from the
-    //  magnetic ballast (120Hz dominant, 240Hz thinner), each tube slightly
-    //  out of tune and drifting. We model that as three osc layers, each with
-    //  its own slow random frequency drift, a low bed of filtered white noise
-    //  (the ballast/air hiss), and a slow volume wobble for line-voltage
-    //  fluctuation. The sum reads as old fixtures in a big empty room rather
-    //  than a synth tone.
-    humGain = ctx.createGain(); humGain.gain.value = 0.08; humGain.connect(master);
+    // ---- master chain: bus -> gentle limiter -> destination ----
+    master = ctx.createGain(); master.gain.value = 0.5;
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -18; comp.knee.value = 24; comp.ratio.value = 4;
+    comp.attack.value = 0.004; comp.release.value = 0.25;
+    master.connect(comp); comp.connect(ctx.destination);
 
-    // 60Hz fundamental — keep this as humNode so setSanityAudio can still
-    // bend its pitch + level as dread rises.
-    humNode = ctx.createOscillator(); humNode.type = 'sawtooth'; humNode.frequency.value = 60;
-    humNode.connect(humGain); humNode.start();
-
-    // 120Hz — the loudest part of a real ballast buzz (even harmonic).
-    const f120 = ctx.createOscillator(); f120.type = 'sine'; f120.frequency.value = 120;
-    const f120g = ctx.createGain(); f120g.gain.value = 0.045; f120.connect(f120g); f120g.connect(master); f120.start();
-
-    // 240Hz — thin upper harmonic that gives the buzz its "electric" edge.
-    const f240 = ctx.createOscillator(); f240.type = 'sine'; f240.frequency.value = 240;
-    const f240g = ctx.createGain(); f240g.gain.value = 0.018; f240.connect(f240g); f240g.connect(master); f240.start();
-
-    // Low sub drone — the room's body. Retained as droneNode for zone audio.
-    droneNode = ctx.createOscillator(); droneNode.type = 'sine'; droneNode.frequency.value = 40;
-    const dg = ctx.createGain(); dg.gain.value = 0.06; droneNode.connect(dg); dg.connect(master); droneNode.start();
-
-    // Filtered white-noise bed: the airy hiss/rattle of tubes + ventilation.
-    const hissNoise = loopNoise();
-    const hissBP = ctx.createBiquadFilter(); hissBP.type = 'bandpass'; hissBP.frequency.value = 2400; hissBP.Q.value = 0.5;
-    const hissGain = ctx.createGain(); hissGain.gain.value = 0.012;
-    hissNoise.connect(hissBP); hissBP.connect(hissGain); hissGain.connect(master); hissNoise.start();
-
-    // Subtle random frequency drift per layer — each fixture pitch-wanders
-    // independently so they beat against each other instead of phase-locking.
-    const drift = (param, depth) => {
-      const o = ctx.createOscillator();
-      o.type = 'sine';
-      o.frequency.value = 0.05 + Math.random() * 0.13;   // very slow wander
-      const g = ctx.createGain(); g.gain.value = depth;
-      o.connect(g); g.connect(param); o.start();
-      return o;
+    // ---- reverb send: a shared cold room ----
+    reverb = ctx.createConvolver(); reverb.buffer = makeReverbIR();
+    busDry = ctx.createGain(); busDry.gain.value = 1.0; busDry.connect(master);
+    busWet = ctx.createGain(); busWet.gain.value = 0.55; busWet.connect(reverb); reverb.connect(master);
+    // helper: connect a node to both dry and wet busses
+    const toRoom = (node, wet = 1) => {
+      node.connect(busDry);
+      if (wet > 0) { const w = ctx.createGain(); w.gain.value = wet; node.connect(w); w.connect(busWet); }
     };
-    drift(humNode.frequency, 0.9);
-    drift(f120.frequency, 1.6);
-    drift(f240.frequency, 2.8);
 
-    // Slow volume fluctuation on the fixture bus to mimic electrical/line
-    // flicker — never silent, just a gentle uneven swell. We modulate around
-    // the base humGain level via a dedicated LFO into its gain.
-    const flickLfo = ctx.createOscillator(); flickLfo.type = 'sine'; flickLfo.frequency.value = 0.18;
-    const flickGain = ctx.createGain(); flickGain.gain.value = 0.02;
-    flickLfo.connect(flickGain); flickGain.connect(humGain.gain); flickLfo.start();
-    // a faster, shallower jitter layered on top for the restless buzz feel
-    const flickLfo2 = ctx.createOscillator(); flickLfo2.type = 'triangle'; flickLfo2.frequency.value = 1.7;
-    const flickGain2 = ctx.createGain(); flickGain2.gain.value = 0.006;
-    flickLfo2.connect(flickGain2); flickGain2.connect(humGain.gain); flickLfo2.start();
+    // ---- deep room rumble — FELT, not heard ----
+    //  A low sine through a steep lowpass. No bright harmonics = no buzz.
+    //  humGain/humNode/droneNode keep their names so setSanityAudio + zone code
+    //  still work, but the character is now a sub rumble, not a fixture.
+    humGain = ctx.createGain(); humGain.gain.value = 0.16;
+    const humLP = ctx.createBiquadFilter(); humLP.type = 'lowpass'; humLP.frequency.value = 120; humLP.Q.value = 0.4;
+    humGain.connect(humLP); toRoom(humLP, 0.25);
+    humNode = ctx.createOscillator(); humNode.type = 'sine'; humNode.frequency.value = 48;
+    humNode.connect(humGain); humNode.start();
+    // a second, even lower body tone for chest-weight
+    droneNode = ctx.createOscillator(); droneNode.type = 'sine'; droneNode.frequency.value = 33;
+    const dg = ctx.createGain(); dg.gain.value = 0.12; droneNode.connect(dg); toRoom(dg, 0.15); droneNode.start();
+    // very slow wander so it never sits perfectly still (uneasy, not pulsing)
+    const humDrift = ctx.createOscillator(); humDrift.type = 'sine'; humDrift.frequency.value = 0.06;
+    const humDriftG = ctx.createGain(); humDriftG.gain.value = 1.2;
+    humDrift.connect(humDriftG); humDriftG.connect(humNode.frequency); humDrift.start();
 
-    // ---- threat channel (hound growl): looping noise -> lowpass -> gain -> pan ----
+    // ---- low-mid "presence" bed: a quiet, dark filtered-noise layer in the
+    //  150-400Hz region so the atmosphere still reads on laptop/phone speakers
+    //  that can't reproduce the sub. Kept low and band-limited so it stays a
+    //  dark wash, never an audible tone/buzz.
+    const pres = loopNoise();
+    const presLP = ctx.createBiquadFilter(); presLP.type = 'lowpass'; presLP.frequency.value = 400; presLP.Q.value = 0.5;
+    const presHP = ctx.createBiquadFilter(); presHP.type = 'highpass'; presHP.frequency.value = 130;
+    const presBedG = ctx.createGain(); presBedG.gain.value = 0.014;
+    pres.connect(presHP); presHP.connect(presLP); presLP.connect(presBedG); toRoom(presBedG, 0.7); pres.start();
+    // tie its level to the slow air swell so the whole room breathes together
+    const presBedLfo = ctx.createOscillator(); presBedLfo.type = 'sine'; presBedLfo.frequency.value = 0.045;
+    const presBedLfoG = ctx.createGain(); presBedLfoG.gain.value = 0.008;
+    presBedLfo.connect(presBedLfoG); presBedLfoG.connect(presBedG.gain); presBedLfo.start();
+
+    // ---- broadband air: the sound of a vast empty volume ----
+    airFilter = ctx.createBiquadFilter(); airFilter.type = 'lowpass'; airFilter.frequency.value = 520; airFilter.Q.value = 0.3;
+    airGain = ctx.createGain(); airGain.gain.value = 0.03;
+    const airN = loopNoise(); airN.connect(airFilter); airFilter.connect(airGain); toRoom(airGain, 0.8); airN.start();
+    // slow swell on the air so the room "breathes"
+    const airLfo = ctx.createOscillator(); airLfo.type = 'sine'; airLfo.frequency.value = 0.05;
+    const airLfoG = ctx.createGain(); airLfoG.gain.value = 0.018;
+    airLfo.connect(airLfoG); airLfoG.connect(airGain.gain); airLfo.start();
+
+    // ---- hound growl: filtered noise, slow grain, lowpassed ----
     threatGain = ctx.createGain(); threatGain.gain.value = 0;
     threatPan = ctx.createStereoPanner ? ctx.createStereoPanner() : ctx.createGain();
-    threatFilter = ctx.createBiquadFilter(); threatFilter.type = 'lowpass'; threatFilter.frequency.value = 180;
-    const tn = loopNoise(); tn.connect(threatFilter); threatFilter.connect(threatGain); threatGain.connect(threatPan); threatPan.connect(master); tn.start();
-    const tlfo = ctx.createOscillator(); tlfo.type = 'sine'; tlfo.frequency.value = 7; const tlg = ctx.createGain(); tlg.gain.value = 60;
-    tlfo.connect(tlg); tlg.connect(threatFilter.frequency); tlfo.start();
+    threatFilter = ctx.createBiquadFilter(); threatFilter.type = 'lowpass'; threatFilter.frequency.value = 200; threatFilter.Q.value = 4;
+    const tn = loopNoise(); tn.connect(threatFilter); threatFilter.connect(threatGain); threatGain.connect(threatPan);
+    threatPan.connect(busDry);
+    const tpw = ctx.createGain(); tpw.gain.value = 0.6; threatPan.connect(tpw); tpw.connect(busWet);
+    tn.start();
+    // slow irregular amplitude grain = breathing/snarling, not a steady tone
+    const tlfo = ctx.createOscillator(); tlfo.type = 'sine'; tlfo.frequency.value = 2.3;
+    const tlg = ctx.createGain(); tlg.gain.value = 90; tlfo.connect(tlg); tlg.connect(threatFilter.frequency); tlfo.start();
 
-    // ---- presence channel (watcher/smiler/wanderer): detuned osc -> gain -> pan ----
+    // ---- presence: inharmonic metallic shimmer + breath noise ----
     presGain = ctx.createGain(); presGain.gain.value = 0;
     presPan = ctx.createStereoPanner ? ctx.createStereoPanner() : ctx.createGain();
-    presOsc = ctx.createOscillator(); presOsc.type = 'sine'; presOsc.frequency.value = 90;
-    presOsc2 = ctx.createOscillator(); presOsc2.type = 'sine'; presOsc2.frequency.value = 93;
-    presOsc.connect(presGain); presOsc2.connect(presGain); presGain.connect(presPan); presPan.connect(master);
+    presFilter = ctx.createBiquadFilter(); presFilter.type = 'bandpass'; presFilter.frequency.value = 1200; presFilter.Q.value = 6;
+    presOsc = ctx.createOscillator(); presOsc.type = 'triangle'; presOsc.frequency.value = 220;
+    presOsc2 = ctx.createOscillator(); presOsc2.type = 'sine'; presOsc2.frequency.value = 220 * 1.41; // tritone-ish, inharmonic
+    presOsc.connect(presFilter); presOsc2.connect(presFilter); presFilter.connect(presGain); presGain.connect(presPan);
+    presPan.connect(busDry);
+    const ppw = ctx.createGain(); ppw.gain.value = 0.9; presPan.connect(ppw); ppw.connect(busWet);
     presOsc.start(); presOsc2.start();
+    // breath layer
+    breathGain = ctx.createGain(); breathGain.gain.value = 0;
+    breathFilter = ctx.createBiquadFilter(); breathFilter.type = 'bandpass'; breathFilter.frequency.value = 700; breathFilter.Q.value = 1.2;
+    const bn = loopNoise(); bn.connect(breathFilter); breathFilter.connect(breathGain); breathGain.connect(presPan); bn.start();
+    const blfo = ctx.createOscillator(); blfo.type = 'sine'; blfo.frequency.value = 0.45; // slow breathing
+    const blg = ctx.createGain(); blg.gain.value = 0.5; blfo.connect(blg); blg.connect(breathFilter.frequency); blfo.start();
 
-    // ---- whispers ----
+    // ---- "something is near" dissonant swell (rises with proximity) ----
+    swellGain = ctx.createGain(); swellGain.gain.value = 0;
+    swellOsc = ctx.createOscillator(); swellOsc.type = 'sawtooth'; swellOsc.frequency.value = 73;
+    swellOsc2 = ctx.createOscillator(); swellOsc2.type = 'sawtooth'; swellOsc2.frequency.value = 77.5; // beating, sour
+    const swLP = ctx.createBiquadFilter(); swLP.type = 'lowpass'; swLP.frequency.value = 420; swLP.Q.value = 1;
+    swellOsc.connect(swLP); swellOsc2.connect(swLP); swLP.connect(swellGain); toRoom(swellGain, 0.7);
+    swellOsc.start(); swellOsc2.start();
+
+    // ---- whispers (airier) ----
     whisperGain = ctx.createGain(); whisperGain.gain.value = 0;
-    const wbp = ctx.createBiquadFilter(); wbp.type = 'bandpass'; wbp.frequency.value = 1100; wbp.Q.value = 0.8;
-    const wn = loopNoise(); wn.connect(wbp); wbp.connect(whisperGain); whisperGain.connect(master);
-    const wlfo = ctx.createOscillator(); wlfo.type = 'sine'; wlfo.frequency.value = 0.7; const wlg = ctx.createGain(); wlg.gain.value = 0.04;
-    wlfo.connect(wlg); wlg.connect(whisperGain.gain); wn.start(); wlfo.start();
+    const wbp = ctx.createBiquadFilter(); wbp.type = 'bandpass'; wbp.frequency.value = 1500; wbp.Q.value = 0.7;
+    const wn = loopNoise(); wn.connect(wbp); wbp.connect(whisperGain); toRoom(whisperGain, 1.0);
+    const wlfo = ctx.createOscillator(); wlfo.type = 'sine'; wlfo.frequency.value = 0.9;
+    const wlg = ctx.createGain(); wlg.gain.value = 0.05; wlfo.connect(wlg); wlg.connect(whisperGain.gain);
+    const wfl = ctx.createOscillator(); wfl.type = 'sine'; wfl.frequency.value = 0.13; // sweeps the band = "voices"
+    const wflg = ctx.createGain(); wflg.gain.value = 600; wfl.connect(wflg); wflg.connect(wbp.frequency);
+    wn.start(); wlfo.start(); wfl.start();
 
     // ---- music bus ----
-    musicGain = ctx.createGain(); musicGain.gain.value = 0; musicGain.connect(master);
+    musicGain = ctx.createGain(); musicGain.gain.value = 0; toRoom(musicGain, 1.0);
 
     initialized = true;
     dripLoop();
     musicLoop();
+    fixtureLoop();
+    scareLoop();
   } catch (e) { /* no audio */ }
 }
 
 const T = () => ctx.currentTime;
 const ramp = (param, v, t = 0.4) => { try { param.setTargetAtTime(v, T(), t); } catch (e) { param.value = v; } };
 
+// small helper: a transient routed through the room (dry + wet)
+function spawnToRoom(node, wet = 0.7) {
+  node.connect(busDry);
+  const w = ctx.createGain(); w.gain.value = wet; node.connect(w); w.connect(busWet);
+}
+
 // ---------- one-shots ----------
 export function playStepSound() {
   if (!ctx) return;
   try {
-    const now = T(), g = ctx.createGain(); g.connect(master);
-    g.gain.setValueAtTime(0.1, now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
-    const s = ctx.createBufferSource(); s.buffer = noiseBuffer(0.15);
-    const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 260;
-    s.connect(f); f.connect(g); s.start(now);
+    const now = T(), g = ctx.createGain();
+    g.gain.setValueAtTime(0.09, now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+    const s = ctx.createBufferSource(); s.buffer = noiseBuffer(0.18);
+    const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 200;
+    s.connect(f); f.connect(g); spawnToRoom(g, 0.4); s.start(now);
   } catch (e) {}
 }
 export function playDripSound() {
   if (!ctx) return;
   try {
-    const now = T(), g = ctx.createGain(); g.connect(master);
-    g.gain.setValueAtTime(0.12, now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+    const now = T(), g = ctx.createGain();
+    g.gain.setValueAtTime(0.1, now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
     const o = ctx.createOscillator(); o.type = 'sine';
-    o.frequency.setValueAtTime(500 + Math.random() * 500, now); o.frequency.exponentialRampToValueAtTime(90, now + 0.4);
-    o.connect(g); o.start(now); o.stop(now + 0.45);
+    o.frequency.setValueAtTime(700 + Math.random() * 600, now); o.frequency.exponentialRampToValueAtTime(110, now + 0.4);
+    o.connect(g); spawnToRoom(g, 1.0); o.start(now); o.stop(now + 0.5);
   } catch (e) {}
 }
 export function playTransitionSound() {
   if (!ctx) return;
   try {
-    const now = T(), g = ctx.createGain(); g.connect(master);
-    g.gain.setValueAtTime(0.45, now); g.gain.exponentialRampToValueAtTime(0.001, now + 2);
+    const now = T(), g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, now); g.gain.exponentialRampToValueAtTime(0.4, now + 0.6);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 3.2);
+    // descending inharmonic drone — a fall into the next place
     const o = ctx.createOscillator(); o.type = 'sawtooth';
-    o.frequency.setValueAtTime(200, now); o.frequency.exponentialRampToValueAtTime(20, now + 2);
-    o.connect(g); o.start(now); o.stop(now + 2);
+    o.frequency.setValueAtTime(120, now); o.frequency.exponentialRampToValueAtTime(24, now + 3.2);
+    const o2 = ctx.createOscillator(); o2.type = 'sine'; o2.frequency.value = 41;
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 380;
+    o.connect(lp); o2.connect(lp); lp.connect(g); spawnToRoom(g, 0.9);
+    o.start(now); o.stop(now + 3.3); o2.start(now); o2.stop(now + 3.3);
   } catch (e) {}
 }
 // kept for compatibility
 export function playEntitySound() { playSting('watcher'); }
 
-// stinger when something gets close / is documented
+// stinger when something gets close / is documented — short dissonant hit + sub
 export function playSting(type = 'watcher') {
   if (!ctx) return;
   try {
-    const now = T(), g = ctx.createGain(); g.connect(master);
-    g.gain.setValueAtTime(0.28, now); g.gain.exponentialRampToValueAtTime(0.001, now + 1.3);
-    const o = ctx.createOscillator();
-    o.type = type === 'hound' ? 'square' : 'sawtooth';
-    const f0 = type === 'smiler' ? 520 : type === 'hound' ? 110 : 200;
-    o.frequency.setValueAtTime(f0, now); o.frequency.exponentialRampToValueAtTime(28, now + 1.3);
-    o.connect(g); o.start(now); o.stop(now + 1.35);
+    const now = T();
+    // sub-bass impact
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.32, now); g.gain.exponentialRampToValueAtTime(0.001, now + 1.4);
+    const o = ctx.createOscillator(); o.type = 'sine';
+    const f0 = type === 'smiler' ? 180 : type === 'hound' ? 70 : 120;
+    o.frequency.setValueAtTime(f0, now); o.frequency.exponentialRampToValueAtTime(24, now + 1.0);
+    o.connect(g); spawnToRoom(g, 0.6); o.start(now); o.stop(now + 1.45);
+    // metallic dissonant top (bandpassed noise burst) — a scrape/shriek
+    const ng = ctx.createGain();
+    ng.gain.setValueAtTime(type === 'smiler' ? 0.16 : 0.09, now); ng.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
+    const ns = ctx.createBufferSource(); ns.buffer = noiseBuffer(0.7);
+    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 8;
+    bp.frequency.setValueAtTime(type === 'smiler' ? 2600 : 900, now);
+    bp.frequency.exponentialRampToValueAtTime(type === 'smiler' ? 1400 : 400, now + 0.7);
+    ns.connect(bp); bp.connect(ng); spawnToRoom(ng, 1.0); ns.start(now); ns.stop(now + 0.72);
   } catch (e) {}
 }
 export function playPickupSound() {
   if (!ctx) return;
   try {
-    const now = T(), g = ctx.createGain(); g.connect(master);
-    g.gain.setValueAtTime(0.0001, now); g.gain.exponentialRampToValueAtTime(0.18, now + 0.05); g.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
+    const now = T(), g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, now); g.gain.exponentialRampToValueAtTime(0.14, now + 0.05); g.gain.exponentialRampToValueAtTime(0.001, now + 0.55);
     const o = ctx.createOscillator(); o.type = 'sine';
-    o.frequency.setValueAtTime(380, now); o.frequency.linearRampToValueAtTime(620, now + 0.25);
-    o.connect(g); o.start(now); o.stop(now + 0.65);
+    o.frequency.setValueAtTime(330, now); o.frequency.linearRampToValueAtTime(495, now + 0.22);
+    o.connect(g); spawnToRoom(g, 0.5); o.start(now); o.stop(now + 0.6);
   } catch (e) {}
 }
 export function playRecordBeep(on = true) {
   if (!ctx) return;
   try {
-    const now = T(), g = ctx.createGain(); g.connect(master);
-    g.gain.setValueAtTime(0.12, now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
-    const o = ctx.createOscillator(); o.type = 'square'; o.frequency.value = on ? 880 : 440;
-    o.connect(g); o.start(now); o.stop(now + 0.13);
+    const now = T(), g = ctx.createGain();
+    g.gain.setValueAtTime(0.1, now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+    const o = ctx.createOscillator(); o.type = 'sine'; o.frequency.value = on ? 1320 : 660;
+    o.connect(g); spawnToRoom(g, 0.2); o.start(now); o.stop(now + 0.13);
   } catch (e) {}
 }
 
 // ---------- zone ambience ----------
 const ZONE_PROFILES = [
-  { drone: 40, drip: 4200, music: false, hum: 60 },
-  { drone: 36, drip: 2600, music: true,  hum: 58 },   // dripping, musical
-  { drone: 52, drip: 6800, music: false, hum: 66 },
-  { drone: 33, drip: 3400, music: true,  hum: 54 },
-  { drone: 46, drip: 9000, music: false, hum: 70 },   // dry, high buzz
-  { drone: 30, drip: 2200, music: true,  hum: 50 },   // deep, musical, wet
+  { drone: 33, drip: 4200, music: false, air: 480 },
+  { drone: 30, drip: 2600, music: true,  air: 360 },
+  { drone: 38, drip: 6800, music: false, air: 640 },
+  { drone: 28, drip: 3400, music: true,  air: 300 },
+  { drone: 35, drip: 9000, music: false, air: 720 },
+  { drone: 26, drip: 2200, music: true,  air: 260 },
 ];
 export function setZoneAudio(zoneIndex) {
   if (!ctx || zoneIndex === curZone) return;
@@ -216,8 +292,9 @@ export function setZoneAudio(zoneIndex) {
   const p = ZONE_PROFILES[((zoneIndex % ZONE_PROFILES.length) + ZONE_PROFILES.length) % ZONE_PROFILES.length];
   dripRate = p.drip;
   musicOn = p.music;
-  ramp(droneNode.frequency, p.drone, 2.5);
-  ramp(musicGain.gain, p.music ? 0.09 : 0.0, 3.0);
+  ramp(droneNode.frequency, p.drone, 4.0);
+  if (airFilter) ramp(airFilter.frequency, p.air, 4.0);
+  ramp(musicGain.gain, p.music ? 0.08 : 0.0, 4.0);
 }
 
 // ---------- spatial entity audio ----------
@@ -228,32 +305,38 @@ export function updateSpatialAudio(player, entities, dt = 16) {
     const rx = Math.cos(player.angle + Math.PI / 2), ry = Math.sin(player.angle + Math.PI / 2);
     const panOf = (e, d) => Math.max(-1, Math.min(1, ((e.x - player.x) * rx + (e.y - player.y) * ry) / (d || 1)));
 
-    let hound = null, other = null;
+    let hound = null, other = null, nearest = 1e9;
     for (const e of (entities || [])) {
       const d = e.dist || Math.hypot(e.x - player.x, e.y - player.y);
+      if (d < nearest) nearest = d;
       if (e.type === 'hound') { if (!hound || d < hound.d) hound = { e, d }; }
       else { if (!other || d < other.d) other = { e, d }; }
     }
 
+    // dissonant proximity swell: rises only when something is genuinely close
+    nearAmount = nearest < 10 ? (1 - nearest / 10) : 0;
+    ramp(swellGain.gain, nearAmount * nearAmount * 0.12, 0.6);
+
     if (hound && hound.d < 15) {
-      const v = (1 - hound.d / 15) * 0.32;
-      ramp(threatGain.gain, v, 0.15);
+      const v = (1 - hound.d / 15) * 0.34;
+      ramp(threatGain.gain, v, 0.18);
       if (threatPan.pan) ramp(threatPan.pan, panOf(hound.e, hound.d), 0.2);
-      ramp(threatFilter.frequency, 140 + (1 - hound.d / 15) * 260, 0.2);
-      // footfalls quicken as it nears
+      ramp(threatFilter.frequency, 150 + (1 - hound.d / 15) * 300, 0.25);
       stepAccum += dt;
       const interval = 180 + hound.d * 36;
       if (stepAccum > interval) { stepAccum = 0; if (hound.d < 11) playStepSound(); }
-    } else ramp(threatGain.gain, 0, 0.4);
+    } else ramp(threatGain.gain, 0, 0.5);
 
     if (other && other.d < 13) {
       const t = other.e.type;
-      const base = t === 'smiler' ? 360 : t === 'watcher' ? 70 : 130;
-      const v = (1 - other.d / 13) * (t === 'smiler' ? 0.16 : 0.1);
-      ramp(presGain.gain, v, 0.2);
-      ramp(presOsc.frequency, base, 0.3); ramp(presOsc2.frequency, base * 1.03, 0.3);
-      if (presPan.pan) ramp(presPan.pan, panOf(other.e, other.d), 0.25);
-    } else ramp(presGain.gain, 0, 0.5);
+      const base = t === 'smiler' ? 330 : t === 'watcher' ? 150 : 210;
+      const v = (1 - other.d / 13) * (t === 'smiler' ? 0.12 : 0.07);
+      ramp(presGain.gain, v, 0.25);
+      ramp(breathGain.gain, (1 - other.d / 13) * 0.06, 0.3);
+      ramp(presOsc.frequency, base, 0.4); ramp(presOsc2.frequency, base * 1.41, 0.4);
+      ramp(presFilter.frequency, 900 + (1 - other.d / 13) * 1600, 0.4);
+      if (presPan.pan) ramp(presPan.pan, panOf(other.e, other.d), 0.3);
+    } else { ramp(presGain.gain, 0, 0.6); ramp(breathGain.gain, 0, 0.6); }
   } catch (e) {}
 }
 
@@ -261,9 +344,11 @@ export function updateSpatialAudio(player, entities, dt = 16) {
 export function setSanityAudio(sanity) {
   if (!ctx) return;
   const dread = (100 - sanity) / 100;
-  ramp(humGain.gain, 0.08 + dread * 0.16, 0.5);
-  if (humNode) ramp(humNode.frequency, 56 + dread * 30, 0.6);
-  ramp(whisperGain.gain, sanity < 55 ? ((55 - sanity) / 55) * 0.14 : 0, 0.8);
+  // rumble swells and the air thickens as you fray — no pitch-up buzz
+  ramp(humGain.gain, 0.16 + dread * 0.18, 0.7);
+  if (humNode) ramp(humNode.frequency, 48 - dread * 8, 0.8);   // sinks, doesn't rise
+  if (airGain) ramp(airGain.gain, 0.03 + dread * 0.05, 0.8);
+  ramp(whisperGain.gain, sanity < 60 ? ((60 - sanity) / 60) * 0.12 : 0, 1.0);
 }
 // kept for compatibility (dread is inverse of sanity)
 export function setDreadAudio(dread) { setSanityAudio(100 - dread); }
@@ -272,30 +357,109 @@ export function setDreadAudio(dread) { setSanityAudio(100 - dread); }
 function dripLoop() {
   if (!ctx) return;
   const next = dripRate * (0.5 + Math.random());
-  dripTimer = setTimeout(() => { if (Math.random() < 0.8) playDripSound(); dripLoop(); }, next);
+  dripTimer = setTimeout(() => { if (Math.random() < 0.7) playDripSound(); dripLoop(); }, next);
 }
-const SCALE = [0, 3, 5, 7, 10, 12];      // minor-ish, a little dissonant
+
+// occasional dead-fixture tick/buzz — short, irregular, distant. NOT sustained.
+function fixtureBuzz() {
+  if (!ctx) return;
+  try {
+    const now = T(), g = ctx.createGain();
+    const dur = 0.05 + Math.random() * 0.22;
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(0.05 + Math.random() * 0.04, now + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0008, now + dur);
+    const o = ctx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = 110 + Math.random() * 30;
+    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 2000 + Math.random() * 1500; bp.Q.value = 3;
+    // a fast amplitude stutter so it reads as an electrical fault, not a note
+    const stut = ctx.createOscillator(); stut.type = 'square'; stut.frequency.value = 24 + Math.random() * 40;
+    const stutG = ctx.createGain(); stutG.gain.value = 0.5; stut.connect(stutG); stutG.connect(g.gain);
+    o.connect(bp); bp.connect(g); spawnToRoom(g, 0.9);
+    o.start(now); o.stop(now + dur + 0.02); stut.start(now); stut.stop(now + dur + 0.02);
+  } catch (e) {}
+}
+function fixtureLoop() {
+  if (!ctx) return;
+  fixtureTimer = setTimeout(() => { if (Math.random() < 0.5) fixtureBuzz(); fixtureLoop(); }, 4000 + Math.random() * 9000);
+}
+
+// irregular distant event: a low groan/impact somewhere in the building.
+function distantScare() {
+  if (!ctx) return;
+  try {
+    const now = T(); const pan = ctx.createStereoPanner ? ctx.createStereoPanner() : ctx.createGain();
+    if (pan.pan) pan.pan.value = Math.random() * 2 - 1;
+    const g = ctx.createGain();
+    const kind = Math.random();
+    if (kind < 0.5) {
+      // distant impact / door slam: filtered noise thud + sub
+      g.gain.setValueAtTime(0.0001, now);
+      g.gain.exponentialRampToValueAtTime(0.12, now + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, now + 0.9);
+      const ns = ctx.createBufferSource(); ns.buffer = noiseBuffer(0.9);
+      const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 320;
+      const o = ctx.createOscillator(); o.type = 'sine';
+      o.frequency.setValueAtTime(80, now); o.frequency.exponentialRampToValueAtTime(30, now + 0.6);
+      ns.connect(lp); lp.connect(g); o.connect(g);
+      g.connect(pan); pan.connect(busDry);
+      const w = ctx.createGain(); w.gain.value = 1.2; pan.connect(w); w.connect(busWet); // very reverberant = far
+      ns.start(now); ns.stop(now + 0.92); o.start(now); o.stop(now + 0.92);
+    } else {
+      // distant groan/moan: inharmonic low swell
+      g.gain.setValueAtTime(0.0001, now);
+      g.gain.exponentialRampToValueAtTime(0.07, now + 0.5);
+      g.gain.exponentialRampToValueAtTime(0.001, now + 2.4);
+      const o = ctx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = 90 + Math.random() * 50;
+      const o2 = ctx.createOscillator(); o2.type = 'sawtooth'; o2.frequency.value = o.frequency.value * 1.06;
+      const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 500; lp.Q.value = 2;
+      const wob = ctx.createOscillator(); wob.type = 'sine'; wob.frequency.value = 4 + Math.random() * 3;
+      const wobG = ctx.createGain(); wobG.gain.value = 12; wob.connect(wobG); wobG.connect(o.frequency);
+      o.connect(lp); o2.connect(lp); lp.connect(g);
+      g.connect(pan); pan.connect(busDry);
+      const w = ctx.createGain(); w.gain.value = 1.3; pan.connect(w); w.connect(busWet);
+      o.start(now); o.stop(now + 2.5); o2.start(now); o2.stop(now + 2.5); wob.start(now); wob.stop(now + 2.5);
+    }
+  } catch (e) {}
+}
+function scareLoop() {
+  if (!ctx) return;
+  // base interval long; tightens when something is near (nearAmount)
+  const base = 14000 + Math.random() * 16000;
+  const next = base * (1 - nearAmount * 0.5);
+  scareTimer = setTimeout(() => { if (Math.random() < 0.6 + nearAmount * 0.3) distantScare(); scareLoop(); }, next);
+}
+
+const SCALE = [0, 1, 6, 7, 11];          // half-steps + tritone — sour, unresolved
 function musicNote() {
   if (!ctx || !musicOn) return;
   try {
     const now = T();
-    const root = 196;                       // G3-ish
-    const semi = SCALE[(Math.random() * SCALE.length) | 0] + (Math.random() < 0.3 ? 12 : 0);
+    const root = 110;                       // A2 — lower, heavier
+    const semi = SCALE[(Math.random() * SCALE.length) | 0] + (Math.random() < 0.4 ? 12 : 0);
     const freq = root * Math.pow(2, semi / 12);
-    const g = ctx.createGain(); g.connect(musicGain);
+    const g = ctx.createGain();
     g.gain.setValueAtTime(0.0001, now);
-    g.gain.exponentialRampToValueAtTime(0.22, now + 0.04);
-    g.gain.exponentialRampToValueAtTime(0.0008, now + 2.6);
-    const o = ctx.createOscillator(); o.type = 'triangle'; o.frequency.value = freq;
-    const o2 = ctx.createOscillator(); o2.type = 'sine'; o2.frequency.value = freq * 2.01; // shimmer
-    const g2 = ctx.createGain(); g2.gain.value = 0.3; o2.connect(g2); g2.connect(g);
-    o.connect(g); o.start(now); o.stop(now + 2.7); o2.start(now); o2.stop(now + 2.7);
+    g.gain.exponentialRampToValueAtTime(0.16, now + 0.08);
+    g.gain.exponentialRampToValueAtTime(0.0006, now + 3.4);
+    // detuned pair through a lowpass — a sour, bowed-string-ish swell
+    const o = ctx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = freq;
+    const o2 = ctx.createOscillator(); o2.type = 'sawtooth'; o2.frequency.value = freq * 1.008;
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 800; lp.Q.value = 3;
+    o.connect(lp); o2.connect(lp); lp.connect(g); spawnToRoom(g, 1.2);
+    o.start(now); o.stop(now + 3.5); o2.start(now); o2.stop(now + 3.5);
   } catch (e) {}
 }
 function musicLoop() {
   if (!ctx) return;
-  musicTimer = setTimeout(() => { if (musicOn && Math.random() < 0.7) musicNote(); musicLoop(); }, 1400 + Math.random() * 2600);
+  musicTimer = setTimeout(() => { if (musicOn && Math.random() < 0.6) musicNote(); musicLoop(); }, 2600 + Math.random() * 4200);
 }
 
 export function resumeAudio() { if (ctx && ctx.state === 'suspended') ctx.resume(); }
-export function stopAudio() { try { if (dripTimer) clearTimeout(dripTimer); if (musicTimer) clearTimeout(musicTimer); } catch (e) {} }
+export function stopAudio() {
+  try {
+    if (dripTimer) clearTimeout(dripTimer);
+    if (musicTimer) clearTimeout(musicTimer);
+    if (fixtureTimer) clearTimeout(fixtureTimer);
+    if (scareTimer) clearTimeout(scareTimer);
+  } catch (e) {}
+}
