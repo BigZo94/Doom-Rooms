@@ -252,198 +252,49 @@ function makeCeiling(p) {
   return out;
 }
 
-// ---- Entity sprites: a distinct, volumetrically-shaded form per kind.
-//  These are baked at a high "PS2-era" texel density (vs the old chunky
-//  PS1-ish 48x80 billboards) and use soft body lighting, limb separation,
-//  rim light and per-type surface detail so they read as rounded, modelled
-//  creatures rather than flat silhouettes. Glowing features (eyes, grin) are
-//  still drawn at billboard time so they can pulse/redden. alpha 0 = clear.
-const SPR_W = 128, SPR_H = 208;
-
-// soft signed-distance helpers for rounded volumes -------------------------
-const _smooth = (e0, e1, x) => { const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
-// distance to a vertical capsule (rounded limb/torso) in uv space
-function capsuleD(px, py, ax, ay, bx, by, r) {
-  const pax = px - ax, pay = py - ay, bax = bx - ax, bay = by - ay;
-  const h = Math.max(0, Math.min(1, (pax * bax + pay * bay) / (bax * bax + bay * bay) || 0));
-  const dx = pax - bax * h, dy = pay - bay * h;
-  return Math.sqrt(dx * dx + dy * dy) - r;
-}
-
+// ---- Entity sprites: a distinct silhouette per kind. Glowing features (eyes,
+// grin) are drawn at billboard time so they can pulse/redden. alpha 0 = clear.
+const SPR_W = 48, SPR_H = 80;
 function makeBody(type) {
   const out = new Uint32Array(SPR_W * SPR_H);
   const rnd = mulberry32(0xD00D ^ (type.charCodeAt(0) * 2654435761));
-  // per-type form + shading config.
-  //   tone: base albedo rgb (0-255). lum: overall brightness multiplier.
-  //   The light comes from upper-left (camcorder-ish), so we shade by a
-  //   pseudo-normal derived from the body's local surface slope.
+  // per-type form: [baseWidth, headR, headY, lean, tone(rgb), lum, lowSlung]
   const cfg = {
-    wanderer: { tone: [150, 142, 124], lum: 0.92, low: 0, rough: 0.06 },
-    watcher:  { tone: [54, 50, 46],    lum: 0.70, low: 0, rough: 0.04 },
-    smiler:   { tone: [40, 38, 35],    lum: 0.64, low: 0, rough: 0.05 },
-    hound:    { tone: [70, 52, 44],    lum: 0.78, low: 1, rough: 0.10 },
+    wanderer: { w: 0.135, hr: 0.085, hy: 0.11, lean: 0.05, tone: [120, 116, 104], lum: 0.42, low: 0 },
+    watcher:  { w: 0.095, hr: 0.075, hy: 0.08, lean: 0.04, tone: [26, 24, 22],   lum: 0.16, low: 0 },
+    smiler:   { w: 0.165, hr: 0.10,  hy: 0.16, lean: 0.10, tone: [20, 19, 17],   lum: 0.13, low: 0 },
+    hound:    { w: 0.20,  hr: 0.12,  hy: 0.40, lean: 0.18, tone: [44, 33, 27],   lum: 0.20, low: 1 },
   }[type];
-
-  const LX = -0.55, LY = -0.7, LZ = 0.46;        // light direction (normalized-ish)
-  const Llen = Math.hypot(LX, LY, LZ);
-
   for (let y = 0; y < SPR_H; y++) {
     for (let x = 0; x < SPR_W; x++) {
       const u = x / SPR_W, v = y / SPR_H;
-      // coverage = how "inside" the body we are (>0 inside), used for soft edges
-      let cover = 0;            // 0..1 alpha-ish coverage
-      let depth = 0;            // pseudo-bulge (0 flat .. 1 nearest the camera), drives normal.z
-      let lateral = 0;          // signed horizontal position within the limb, for side shading
-      let region = 0;           // 0 body, 1 head, 2 limb — lets us tint differently
-
-      const lean = (v - 0.5) * (cfg.low ? 0.0 : (type === 'smiler' ? 0.10 : type === 'watcher' ? 0.04 : 0.05));
+      let a = 0, lum = 0;
+      const lean = (v - 0.5) * cfg.lean;
       const cx = 0.5 + lean;
-
       if (!cfg.low) {
-        // ---- upright biped --------------------------------------------------
-        // torso: a tapering capsule from chest to hip; width breathes by type
-        const wTop = type === 'watcher' ? 0.14 : type === 'smiler' ? 0.185 : 0.165;
-        const wBot = wTop * 0.82;
-        const torsoTop = 0.22, torsoBot = 0.74;
-        if (v >= torsoTop && v <= torsoBot + 0.05) {
-          const tt = (v - torsoTop) / (torsoBot - torsoTop);
-          const halfW = wTop + (wBot - wTop) * Math.min(1, tt) + 0.018 * Math.sin(tt * Math.PI); // ribcage swell
-          const d = Math.abs(u - cx);
-          const c = _smooth(halfW, halfW - 0.045, d);
-          if (c > cover) { cover = c; lateral = (u - cx) / (halfW + 1e-4); depth = Math.sqrt(Math.max(0, 1 - lateral * lateral)); region = 0; }
-        }
-        // shoulders: a broad soft lump near the top of the torso
-        {
-          const d = capsuleD(u, v, cx - 0.11, 0.255, cx + 0.11, 0.255, 0.075);
-          const c = _smooth(0.0, -0.05, d);
-          if (c > cover) { cover = c; lateral = (u - cx) / 0.18; depth = _smooth(0.075, -0.045, d); region = 0; }
-        }
-        // head: rounded, slightly egg-shaped
-        const hy = type === 'smiler' ? 0.15 : type === 'watcher' ? 0.105 : 0.125;
-        const hr = type === 'smiler' ? 0.115 : type === 'watcher' ? 0.09 : 0.1;
-        {
-          const hdx = (u - 0.5) / hr, hdy = (v - hy) / (hr * 1.18);
-          const rr = Math.sqrt(hdx * hdx + hdy * hdy);
-          const c = _smooth(1.0, 0.84, rr);
-          if (c > cover) { cover = c; lateral = hdx; depth = Math.sqrt(Math.max(0, 1 - Math.min(1, rr * rr))); region = 1; }
-        }
-        // neck
-        {
-          const d = capsuleD(u, v, 0.5, hy + hr * 0.6, cx, 0.25, 0.05);
-          const c = _smooth(0.0, -0.04, d);
-          if (c > cover) { cover = c; lateral = (u - 0.5) / 0.08; depth = _smooth(0.05, -0.03, d); region = 0; }
-        }
-        // arms: thick capsules from the shoulders, attached to the body line.
-        {
-          const armR = type === 'watcher' ? 0.042 : 0.05;
-          const reach = type === 'smiler' ? 0.14 : 0.06;      // smiler's arms splay out
-          const shoff = wTop + 0.02;
-          const dL = capsuleD(u, v, cx - shoff, 0.27, cx - shoff - reach, 0.72, armR);
-          const dR = capsuleD(u, v, cx + shoff, 0.27, cx + shoff + reach, 0.72, armR);
-          const d = Math.min(dL, dR);
-          const c = _smooth(0.0, -0.05, d);
-          if (c > cover) {
-            cover = c;
-            const near = dL < dR;
-            lateral = near ? -0.5 : 0.5;
-            depth = _smooth(0.06, -0.04, d) * 0.95;
-            region = 2;
-          }
-        }
-        // legs: thick, joined at the hip
-        {
-          const legR = 0.06;
-          const dL = capsuleD(u, v, cx - 0.06, 0.72, cx - 0.07, 0.985, legR);
-          const dR = capsuleD(u, v, cx + 0.06, 0.72, cx + 0.07, 0.985, legR);
-          const d = Math.min(dL, dR);
-          const c = _smooth(0.0, -0.05, d);
-          if (c > cover) { cover = c; lateral = (dL < dR ? -0.5 : 0.5); depth = _smooth(0.06, -0.04, d) * 0.9; region = 2; }
+        // upright biped: tapering torso, head, hanging arms
+        const halfW = cfg.w * (v < 0.18 ? 0.0 : Math.min(1, (v - 0.18) / 0.5)) + (type === 'watcher' ? 0.03 : 0.04);
+        if (v > 0.16 && Math.abs(u - cx) < halfW) { a = 1; lum = cfg.lum + rnd() * 0.05; }
+        const hdx = u - 0.5, hdy = v - cfg.hy;
+        if (Math.sqrt(hdx * hdx * 1.3 + hdy * hdy * 0.7) < cfg.hr) { a = 1; lum = cfg.lum * 0.85 + rnd() * 0.04; }
+        if (v > 0.30 && v < 0.78) {                       // long arms
+          const aw = type === 'watcher' ? 0.022 : 0.03;
+          if (Math.abs(u - (cx - halfW - 0.02)) < aw) { a = 1; lum = cfg.lum * 0.7; }
+          if (Math.abs(u - (cx + halfW + 0.02)) < aw) { a = 1; lum = cfg.lum * 0.7; }
         }
       } else {
-        // ---- hound: low, long, hunched quadruped ----------------------------
-        // body mass: a thick arched capsule running across the lower-mid frame
-        {
-          const d = capsuleD(u, v, 0.26, 0.66, 0.66, 0.60, 0.155);
-          const c = _smooth(0.0, -0.07, d);
-          if (c > cover) { cover = c; lateral = (v - 0.62) / 0.155; depth = _smooth(0.13, -0.06, d); region = 0; }
+        // hound: low, long, hunched mass in the lower half with a forward head
+        if (v > 0.42) {
+          const backH = 0.30 - Math.abs(u - 0.46) * 0.18;   // arched back
+          if (v > (0.78 - backH) && Math.abs(u - 0.5) < cfg.w + 0.14 * (v - 0.42)) { a = 1; lum = cfg.lum + rnd() * 0.05; }
         }
-        // neck/shoulder hump sloping up toward the head (front-heavy build)
-        {
-          const d = capsuleD(u, v, 0.60, 0.62, 0.74, 0.56, 0.115);
-          const c = _smooth(0.0, -0.06, d);
-          if (c > cover) { cover = c; lateral = (u - 0.67) / 0.12; depth = _smooth(0.1, -0.05, d); region = 0; }
-        }
-        // raised hackles / spine ridge
-        {
-          const d = capsuleD(u, v, 0.30, 0.49, 0.56, 0.49, 0.04);
-          const c = _smooth(0.0, -0.03, d);
-          if (c > cover * 0.9) { cover = Math.max(cover, c); lateral = 0; depth = Math.max(depth, _smooth(0.04, -0.025, d)); region = 0; }
-        }
-        // head: blends out of the shoulder hump, thrust forward
-        {
-          const hdx = (u - 0.79) / 0.105, hdy = (v - 0.56) / 0.12;
-          const rr = Math.sqrt(hdx * hdx + hdy * hdy);
-          const c = _smooth(1.0, 0.8, rr);
-          if (c > cover) { cover = c; lateral = hdx * 0.8; depth = Math.sqrt(Math.max(0, 1 - Math.min(1, rr * rr))); region = 1; }
-        }
-        // muzzle: a tapering snout off the head, not a detached block
-        {
-          const d = capsuleD(u, v, 0.84, 0.575, 0.96, 0.60, 0.045);
-          const c = _smooth(0.0, -0.045, d);
-          if (c > cover) { cover = c; lateral = (v - 0.59) / 0.045; depth = _smooth(0.045, -0.03, d); region = 1; }
-        }
-        // four thick legs
-        {
-          const legR = 0.04;
-          const d = Math.min(
-            capsuleD(u, v, 0.34, 0.72, 0.31, 0.97, legR),
-            capsuleD(u, v, 0.44, 0.74, 0.42, 0.985, legR),
-            capsuleD(u, v, 0.58, 0.72, 0.60, 0.97, legR),
-            capsuleD(u, v, 0.67, 0.70, 0.72, 0.96, legR),
-          );
-          const c = _smooth(0.0, -0.045, d);
-          if (c > cover) { cover = c; lateral = 0.3; depth = _smooth(0.05, -0.03, d) * 0.85; region = 2; }
-        }
-        // tail
-        {
-          const d = capsuleD(u, v, 0.26, 0.62, 0.07, 0.50, 0.03);
-          const c = _smooth(0.0, -0.03, d);
-          if (c > cover) { cover = c; lateral = 0; depth = _smooth(0.035, -0.02, d) * 0.75; region = 0; }
+        const hdx = u - 0.74, hdy = v - 0.52;               // head thrust forward
+        if (Math.sqrt(hdx * hdx + hdy * hdy * 1.4) < cfg.hr) { a = 1; lum = cfg.lum * 0.9; }
+        if (v > 0.74 && v < 0.96) {                          // legs
+          for (const lxp of [0.34, 0.5, 0.66, 0.8]) if (Math.abs(u - lxp) < 0.026) { a = 1; lum = cfg.lum * 0.7; }
         }
       }
-
-      if (cover <= 0.02) { out[y * SPR_W + x] = 0; continue; }
-
-      // ---- shading: build a cheap surface normal and light it -------------
-      // normal.x from lateral curvature, normal.y from vertical bulge, z from depth
-      let nx = lateral * 0.9;
-      let ny = (region === 1 ? (v - 0.5) * -1.2 : -0.25);   // heads catch top light
-      let nz = 0.35 + depth * 0.9;
-      const nl = Math.hypot(nx, ny, nz) || 1; nx /= nl; ny /= nl; nz /= nl;
-
-      let diff = (nx * LX + ny * LY + nz * LZ) / Llen;       // -1..1
-      diff = 0.42 + 0.58 * Math.max(0, diff);                // wrap + ambient
-
-      // rim light along the silhouette edge gives the PS2 "specular fresnel" feel
-      const rim = Math.pow(1 - Math.min(1, depth + 0.15), 3) * 0.5;
-
-      // micro surface noise (skin/fur grain), scaled by roughness
-      const grain = (rnd() - 0.5) * cfg.rough;
-
-      let shade = cfg.lum * diff + rim + grain;
-      // region tinting: heads a touch paler, limbs slightly darker / deeper
-      let tr = cfg.tone[0], tg = cfg.tone[1], tb = cfg.tone[2];
-      if (region === 1) { tr *= 1.06; tg *= 1.04; tb *= 1.02; }
-      if (region === 2) { shade *= 0.86; }
-
-      // ambient occlusion in the body crevices (where coverage edge is soft)
-      const ao = 0.65 + 0.35 * _smooth(0.2, 0.9, cover);
-      shade *= ao;
-
-      let r = tr * shade, g = tg * shade, b = tb * shade;
-      // pack with coverage-as-alpha so soft edges anti-alias against the scene
-      const al = (cover * 255) | 0;
-      out[y * SPR_W + x] = pack(r, g, b, al);
+      out[y * SPR_W + x] = a ? pack(cfg.tone[0] * lum * 4.5, cfg.tone[1] * lum * 4.5, cfg.tone[2] * lum * 4.5, 255) : 0;
     }
   }
   return out;
@@ -721,20 +572,10 @@ function drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, ents, z
         if (y < 0 || y >= H) continue;
         const texY = (yy * SPR_H / sH) | 0;
         const sp = body[texY * SPR_W + texX];
-        const sa = sp >>> 24;
-        if (sa === 0) continue;
+        if ((sp >>> 24) === 0) continue;
         let r = (sp & 0xFF) * shade, g = ((sp >> 8) & 0xFF) * shade, b = ((sp >> 16) & 0xFF) * shade;
         if (aggro) { r += 26 * (e.type === 'hound' ? 1 : dr); }
-        if (sa >= 250) {
-          buf[y * W + x] = pack(r, g, b, 255);
-        } else {
-          // soft silhouette edge: alpha-blend over the scene behind it so the
-          // high-res sprite anti-aliases instead of showing stair-stepping.
-          const a = sa / 255;
-          const bg = buf[y * W + x];
-          const br = bg & 0xFF, bgc = (bg >> 8) & 0xFF, bb = (bg >> 16) & 0xFF;
-          buf[y * W + x] = pack(r * a + br * (1 - a), g * a + bgc * (1 - a), b * a + bb * (1 - a), 255);
-        }
+        buf[y * W + x] = pack(r, g, b, 255);
       }
     }
 

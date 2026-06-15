@@ -40,64 +40,16 @@ export function initAudio() {
     ctx = new (window.AudioContext || window.webkitAudioContext)();
     master = ctx.createGain(); master.gain.value = 0.42; master.connect(ctx.destination);
 
-    // ---- persistent fluorescent-fixture ambience + sub drone ----
-    //  Real fluorescent tubes don't sing one clean note: they buzz at the
-    //  mains fundamental (~60Hz here) plus strong even harmonics from the
-    //  magnetic ballast (120Hz dominant, 240Hz thinner), each tube slightly
-    //  out of tune and drifting. We model that as three osc layers, each with
-    //  its own slow random frequency drift, a low bed of filtered white noise
-    //  (the ballast/air hiss), and a slow volume wobble for line-voltage
-    //  fluctuation. The sum reads as old fixtures in a big empty room rather
-    //  than a synth tone.
+    // ---- persistent hum + drone ----
     humGain = ctx.createGain(); humGain.gain.value = 0.08; humGain.connect(master);
-
-    // 60Hz fundamental — keep this as humNode so setSanityAudio can still
-    // bend its pitch + level as dread rises.
     humNode = ctx.createOscillator(); humNode.type = 'sawtooth'; humNode.frequency.value = 60;
     humNode.connect(humGain); humNode.start();
-
-    // 120Hz — the loudest part of a real ballast buzz (even harmonic).
-    const f120 = ctx.createOscillator(); f120.type = 'sine'; f120.frequency.value = 120;
-    const f120g = ctx.createGain(); f120g.gain.value = 0.045; f120.connect(f120g); f120g.connect(master); f120.start();
-
-    // 240Hz — thin upper harmonic that gives the buzz its "electric" edge.
-    const f240 = ctx.createOscillator(); f240.type = 'sine'; f240.frequency.value = 240;
-    const f240g = ctx.createGain(); f240g.gain.value = 0.018; f240.connect(f240g); f240g.connect(master); f240.start();
-
-    // Low sub drone — the room's body. Retained as droneNode for zone audio.
+    const h2 = ctx.createOscillator(); h2.type = 'sine'; h2.frequency.value = 120;
+    const h2g = ctx.createGain(); h2g.gain.value = 0.035; h2.connect(h2g); h2g.connect(master); h2.start();
     droneNode = ctx.createOscillator(); droneNode.type = 'sine'; droneNode.frequency.value = 40;
     const dg = ctx.createGain(); dg.gain.value = 0.06; droneNode.connect(dg); dg.connect(master); droneNode.start();
-
-    // Filtered white-noise bed: the airy hiss/rattle of tubes + ventilation.
-    const hissNoise = loopNoise();
-    const hissBP = ctx.createBiquadFilter(); hissBP.type = 'bandpass'; hissBP.frequency.value = 2400; hissBP.Q.value = 0.5;
-    const hissGain = ctx.createGain(); hissGain.gain.value = 0.012;
-    hissNoise.connect(hissBP); hissBP.connect(hissGain); hissGain.connect(master); hissNoise.start();
-
-    // Subtle random frequency drift per layer — each fixture pitch-wanders
-    // independently so they beat against each other instead of phase-locking.
-    const drift = (param, depth) => {
-      const o = ctx.createOscillator();
-      o.type = 'sine';
-      o.frequency.value = 0.05 + Math.random() * 0.13;   // very slow wander
-      const g = ctx.createGain(); g.gain.value = depth;
-      o.connect(g); g.connect(param); o.start();
-      return o;
-    };
-    drift(humNode.frequency, 0.9);
-    drift(f120.frequency, 1.6);
-    drift(f240.frequency, 2.8);
-
-    // Slow volume fluctuation on the fixture bus to mimic electrical/line
-    // flicker — never silent, just a gentle uneven swell. We modulate around
-    // the base humGain level via a dedicated LFO into its gain.
-    const flickLfo = ctx.createOscillator(); flickLfo.type = 'sine'; flickLfo.frequency.value = 0.18;
-    const flickGain = ctx.createGain(); flickGain.gain.value = 0.02;
-    flickLfo.connect(flickGain); flickGain.connect(humGain.gain); flickLfo.start();
-    // a faster, shallower jitter layered on top for the restless buzz feel
-    const flickLfo2 = ctx.createOscillator(); flickLfo2.type = 'triangle'; flickLfo2.frequency.value = 1.7;
-    const flickGain2 = ctx.createGain(); flickGain2.gain.value = 0.006;
-    flickLfo2.connect(flickGain2); flickGain2.connect(humGain.gain); flickLfo2.start();
+    const lfo = ctx.createOscillator(); lfo.frequency.value = 0.1; const lg = ctx.createGain(); lg.gain.value = 1.5;
+    lfo.connect(lg); lg.connect(humNode.frequency); lfo.start();
 
     // ---- threat channel (hound growl): looping noise -> lowpass -> gain -> pan ----
     threatGain = ctx.createGain(); threatGain.gain.value = 0;
