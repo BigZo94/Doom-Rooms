@@ -1,0 +1,654 @@
+// ============================================================================
+//  BACKROOMS raycaster  —  textured floor/ceiling + wall casting
+//  Pure-JS software renderer writing a single ImageData buffer per frame.
+//  No external deps.  Aesthetic target: the mono-yellow liminal Backrooms —
+//  damp wallpaper, moist office carpet, dropped-ceiling tiles w/ fluorescents.
+// ============================================================================
+
+export const SCREEN_WIDTH = 480;
+export const SCREEN_HEIGHT = 270;
+export const FOV = Math.PI / 3;          // 60°
+export const HALF_FOV = FOV / 2;
+export const MAX_DEPTH = 22;
+
+const TEX = 64;                          // texture size (px)
+const PLANE_LEN = Math.tan(HALF_FOV);    // camera-plane half-length
+const WALL_HEIGHT = 1.8;                  // room height in world units (camera centred).
+                                         // walls + floor/ceiling row-distance scale by
+                                         // this together, so the wall base stays glued
+                                         // to the floor — taller = more oppressive.
+
+// ----------------------------------------------------------------------------
+//  Per-level palettes.  Level 0 = canonical Backrooms yellow.  Deeper levels
+//  shift the whole space without losing the liminal grammar.
+// ----------------------------------------------------------------------------
+export const LEVEL_PALETTES = [
+  { // 0 — The Lobby (classic yellow)
+    wall: [200,184,95], wallHi:[218,202,122], wallLo:[168,150,64], seam:[140,124,52],
+    base:[110,99,48], stain:[120,108,60],
+    carpet:[111,101,51], carpetLo:[78,70,36], wet:[58,52,28], fleck:[140,128,78],
+    tile:[201,192,138], grout:[140,132,86], panel:[247,239,184], glow:[255,250,210],
+    fog:[14,12,5],
+  },
+  { // 1 — Habitable Zone (yellow-green, concrete)
+    wall:[178,186,96], wallHi:[198,204,120], wallLo:[150,156,66], seam:[120,126,52],
+    base:[96,100,48], stain:[110,116,58],
+    carpet:[96,100,52], carpetLo:[66,70,36], wet:[48,52,28], fleck:[128,132,80],
+    tile:[190,194,150], grout:[126,130,92], panel:[238,242,200], glow:[250,252,220],
+    fog:[10,12,6],
+  },
+  { // 2 — Pipe Dreams (grey-green damp)
+    wall:[158,166,120], wallHi:[178,184,140], wallLo:[122,128,88], seam:[98,104,70],
+    base:[84,90,62], stain:[96,102,72],
+    carpet:[84,88,64], carpetLo:[56,60,42], wet:[40,44,30], fleck:[112,116,90],
+    tile:[176,180,150], grout:[112,116,90], panel:[224,228,200], glow:[238,242,214],
+    fog:[9,11,9],
+  },
+  { // 3 — Electrical Station (rust / sodium)
+    wall:[196,128,72], wallHi:[214,148,90], wallLo:[150,96,56], seam:[120,76,44],
+    base:[104,66,40], stain:[126,82,50],
+    carpet:[112,74,44], carpetLo:[78,50,30], wet:[52,34,22], fleck:[150,104,64],
+    tile:[198,160,118], grout:[140,108,72], panel:[250,212,150], glow:[255,224,168],
+    fog:[14,9,5],
+  },
+  { // 4 — Abandoned Office (cold fluorescent blue-grey)
+    wall:[150,154,176], wallHi:[172,176,198], wallLo:[112,116,140], seam:[88,92,114],
+    base:[78,82,104], stain:[92,96,118],
+    carpet:[88,92,112], carpetLo:[58,62,80], wet:[40,44,58], fleck:[120,124,148],
+    tile:[180,184,200], grout:[120,124,146], panel:[226,232,248], glow:[240,246,255],
+    fog:[8,9,13],
+  },
+  { // 5 — Terror Hotel (sickly teal-green)
+    wall:[88,150,124], wallHi:[108,170,142], wallLo:[60,110,90], seam:[44,86,70],
+    base:[44,84,68], stain:[54,98,80],
+    carpet:[52,96,78], carpetLo:[34,66,54], wet:[24,46,38], fleck:[78,128,106],
+    tile:[150,186,168], grout:[96,134,116], panel:[206,238,222], glow:[222,250,236],
+    fog:[6,12,10],
+  },
+];
+
+export function getPalette(level) {
+  return LEVEL_PALETTES[level % LEVEL_PALETTES.length];
+}
+
+// ----------------------------------------------------------------------------
+//  Small deterministic PRNG so textures are stable between frames.
+// ----------------------------------------------------------------------------
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const clamp255 = (v) => (v < 0 ? 0 : v > 255 ? 255 : v | 0);
+const pack = (r, g, b, a = 255) =>
+  ((a << 24) | (clamp255(b) << 16) | (clamp255(g) << 8) | clamp255(r)) >>> 0;
+
+// mix two [r,g,b] by t
+const mix = (c1, c2, t) => [
+  c1[0] + (c2[0] - c1[0]) * t,
+  c1[1] + (c2[1] - c1[1]) * t,
+  c1[2] + (c2[2] - c1[2]) * t,
+];
+
+// ----------------------------------------------------------------------------
+//  Texture generation — all procedural, baked once per palette.
+//  Reference: Backrooms Level 0 — mono-yellow wallpaper w/ scattered
+//  outlets/vents, moist carpet, dropped ceiling w/ irregular fluorescents.
+// ----------------------------------------------------------------------------
+// Seamless (wrapping) value noise in [0,1]; cells^2 lattice, bilerp.
+function makeNoise(rnd, cells) {
+  const g = new Float32Array(cells * cells);
+  for (let i = 0; i < g.length; i++) g[i] = rnd();
+  return (x, y) => {
+    const fx = (x / TEX) * cells, fy = (y / TEX) * cells;
+    const x0 = Math.floor(fx) % cells, y0 = Math.floor(fy) % cells;
+    const x1 = (x0 + 1) % cells, y1 = (y0 + 1) % cells;
+    const tx = fx - Math.floor(fx), ty = fy - Math.floor(fy);
+    const a = g[y0 * cells + x0], b = g[y0 * cells + x1];
+    const c = g[y1 * cells + x0], d = g[y1 * cells + x1];
+    const top = a + (b - a) * tx, bot = c + (d - c) * tx;
+    return top + (bot - top) * ty;
+  };
+}
+
+const addc = (c, v) => [c[0] + v, c[1] + v, c[2] + v];
+const scalec = (c, s) => [c[0] * s, c[1] * s, c[2] * s];
+
+// ---- WALLPAPER -------------------------------------------------------------
+// variant 0: clean   1: duplex electrical outlet   2: HVAC return vent
+// 3: heavy water stain.  All share one mono-yellow base so the space stays
+// oppressively uniform ("the madness of mono-yellow"); only fixtures change.
+function makeWallpaper(p, variant = 0) {
+  const out = new Uint32Array(TEX * TEX);
+  const rnd = mulberry32((0xA17 ^ (p.wall[0] * 131) ^ (variant * 7919)) >>> 0);
+  const blotch = makeNoise(rnd, 5);    // broad damp discoloration
+  const grain = makeNoise(rnd, 32);    // fine paper grain
+  const plate = mix(p.wallHi, [240, 236, 220], 0.6);   // ivory cover plate
+  const plateLo = scalec(plate, 0.82);
+  const slot = scalec(p.base, 0.5);                    // dark socket holes
+  const metal = mix(p.base, [120, 120, 124], 0.5);     // vent louvers
+  for (let y = 0; y < TEX; y++) {
+    for (let x = 0; x < TEX; x++) {
+      const bl = blotch(x, y);
+      let base = mix(p.wallLo, p.wallHi, 0.5 + (bl - 0.5) * 0.45);
+      base = addc(base, (grain(x, y) - 0.5) * 9 + (rnd() - 0.5) * 5);
+      base = scalec(base, 1 - (y / TEX) * 0.10);         // faint top-down light
+      if (bl > 0.72) base = mix(base, p.stain, (bl - 0.72) * 0.7);
+
+      if (variant === 1) {
+        const px0 = 27, py0 = TEX - 22, pw = 11, ph = 15;
+        if (x >= px0 && x < px0 + pw && y >= py0 && y < py0 + ph) {
+          const ex = x - px0, ey = y - py0;
+          const edge = ex === 0 || ey === 0 || ex === pw - 1 || ey === ph - 1;
+          base = edge ? plateLo : plate;
+          for (const cy of [4, 10]) {
+            if (ex >= 3 && ex <= 7 && ey >= cy - 2 && ey <= cy + 2) {
+              base = mix(plate, [0, 0, 0], 0.18);
+              if ((ex === 4 || ex === 6) && ey >= cy - 1 && ey <= cy) base = slot;
+              if (ex === 5 && ey === cy + 1) base = slot;
+            }
+          }
+        }
+      } else if (variant === 2) {
+        const vx0 = 22, vy0 = 20, vw = 20, vh = 16;
+        if (x >= vx0 && x < vx0 + vw && y >= vy0 && y < vy0 + vh) {
+          const ex = x - vx0, ey = y - vy0;
+          const edge = ex === 0 || ey === 0 || ex === vw - 1 || ey === vh - 1;
+          base = edge ? scalec(metal, 0.7) : mix(metal, base, 0.25);
+          if (!edge && ey % 3 === 0) base = scalec(metal, 0.55);
+        }
+      } else if (variant === 3) {
+        const cx = 30 + Math.sin(y * 0.18) * 4;
+        const w = 9 - (y / TEX) * 4;
+        const d = Math.abs(x - cx);
+        if (d < w) {
+          const t = (1 - d / w) * (0.25 + (y / TEX) * 0.5);
+          base = mix(base, p.stain, t * 0.8);
+          base = addc(base, -t * 22);
+        }
+      }
+
+      if (y >= TEX - 7) {
+        base = mix(base, p.base, 0.9);
+        if (y === TEX - 7) base = mix(base, p.wallHi, 0.25);
+      }
+      out[y * TEX + x] = pack(base[0], base[1], base[2]);
+    }
+  }
+  return out;
+}
+
+// ---- CARPET ----------------------------------------------------------------
+// Moist low-pile commercial loop carpet; tile seams every world unit.
+function makeCarpet(p) {
+  const out = new Uint32Array(TEX * TEX);
+  const rnd = mulberry32((0xC0FFEE ^ (p.carpet[1] * 17)) >>> 0);
+  const mott = makeNoise(rnd, 6);    // broad mottling
+  const damp = makeNoise(rnd, 4);    // wet patches
+  for (let y = 0; y < TEX; y++) {
+    for (let x = 0; x < TEX; x++) {
+      let base = mix(p.carpetLo, p.carpet, 0.35 + mott(x, y) * 0.55);
+      const sp = rnd();
+      if (sp > 0.88) base = mix(base, p.fleck, 0.45);
+      else if (sp < 0.12) base = mix(base, p.wet, 0.4);
+      base = addc(base, (rnd() - 0.5) * 8);
+      const dv = damp(x, y);
+      if (dv > 0.62) base = mix(base, p.wet, (dv - 0.62) * 1.1);
+      if (x === 0 || y === 0 || x === TEX - 1 || y === TEX - 1)
+        base = mix(base, p.wet, 0.5);
+      out[y * TEX + x] = pack(base[0], base[1], base[2]);
+    }
+  }
+  return out;
+}
+
+// Ceiling texture maps to a 2x2 world-tile region: a regular acoustic-tile grid
+// with a recessed fluorescent panel in one quadrant -> lights on a lattice.
+// ---- CEILING ---------------------------------------------------------------
+// 4x4 grid of acoustic tiles (texture spans 4 world units) with a couple of
+// long fluorescent troffers placed irregularly -> "inconsistently placed
+// fluorescent lighting" instead of one neat panel per block.
+function makeCeiling(p) {
+  const out = new Uint32Array(TEX * TEX);
+  const rnd = mulberry32((0x5EED ^ (p.tile[0] * 7)) >>> 0);
+  const speck = makeNoise(rnd, 32);
+  const T = TEX / 4;                 // one acoustic tile = 16px = 1 world unit
+  const fixtures = [[0, 0, 1, 2], [2, 1, 2, 1], [1, 3, 1, 1]];
+  const inFixture = (tc, tr) => {
+    for (const f of fixtures)
+      if (tc >= f[0] && tc < f[0] + f[2] && tr >= f[1] && tr < f[1] + f[3]) return f;
+    return null;
+  };
+  for (let y = 0; y < TEX; y++) {
+    for (let x = 0; x < TEX; x++) {
+      const tc = (x / T) | 0, tr = (y / T) | 0;
+      const lx = x - tc * T, ly = y - tr * T;
+      const f = inFixture(tc, tr);
+      let base;
+      if (f) {
+        const gx = x - f[0] * T, gy = y - f[1] * T, gw = f[2] * T, gh = f[3] * T;
+        const frame = gx < 1 || gy < 1 || gx > gw - 2 || gy > gh - 2;
+        if (frame) base = mix(p.grout, p.panel, 0.3);
+        else {
+          base = mix(p.panel, p.glow, 0.45);
+          const along = gw >= gh ? gy : gx;
+          const span = gw >= gh ? gh : gw;
+          if (Math.abs(along - span / 2) < 1.2) base = scalec(base, 0.9);
+          base = addc(base, (rnd() - 0.5) * 5);
+        }
+      } else {
+        base = addc(p.tile.slice(), (speck(x, y) - 0.5) * 14);
+        if (rnd() > 0.82) base = mix(base, p.grout, 0.3);
+      }
+      if ((lx === 0 || ly === 0) && !f) base = mix(base, p.grout, 0.75);
+      out[y * TEX + x] = pack(base[0], base[1], base[2]);
+    }
+  }
+  return out;
+}
+
+// ---- Entity sprites: a distinct silhouette per kind. Glowing features (eyes,
+// grin) are drawn at billboard time so they can pulse/redden. alpha 0 = clear.
+const SPR_W = 48, SPR_H = 80;
+function makeBody(type) {
+  const out = new Uint32Array(SPR_W * SPR_H);
+  const rnd = mulberry32(0xD00D ^ (type.charCodeAt(0) * 2654435761));
+  // per-type form: [baseWidth, headR, headY, lean, tone(rgb), lum, lowSlung]
+  const cfg = {
+    wanderer: { w: 0.135, hr: 0.085, hy: 0.11, lean: 0.05, tone: [120, 116, 104], lum: 0.42, low: 0 },
+    watcher:  { w: 0.095, hr: 0.075, hy: 0.08, lean: 0.04, tone: [26, 24, 22],   lum: 0.16, low: 0 },
+    smiler:   { w: 0.165, hr: 0.10,  hy: 0.16, lean: 0.10, tone: [20, 19, 17],   lum: 0.13, low: 0 },
+    hound:    { w: 0.20,  hr: 0.12,  hy: 0.40, lean: 0.18, tone: [44, 33, 27],   lum: 0.20, low: 1 },
+  }[type];
+  for (let y = 0; y < SPR_H; y++) {
+    for (let x = 0; x < SPR_W; x++) {
+      const u = x / SPR_W, v = y / SPR_H;
+      let a = 0, lum = 0;
+      const lean = (v - 0.5) * cfg.lean;
+      const cx = 0.5 + lean;
+      if (!cfg.low) {
+        // upright biped: tapering torso, head, hanging arms
+        const halfW = cfg.w * (v < 0.18 ? 0.0 : Math.min(1, (v - 0.18) / 0.5)) + (type === 'watcher' ? 0.03 : 0.04);
+        if (v > 0.16 && Math.abs(u - cx) < halfW) { a = 1; lum = cfg.lum + rnd() * 0.05; }
+        const hdx = u - 0.5, hdy = v - cfg.hy;
+        if (Math.sqrt(hdx * hdx * 1.3 + hdy * hdy * 0.7) < cfg.hr) { a = 1; lum = cfg.lum * 0.85 + rnd() * 0.04; }
+        if (v > 0.30 && v < 0.78) {                       // long arms
+          const aw = type === 'watcher' ? 0.022 : 0.03;
+          if (Math.abs(u - (cx - halfW - 0.02)) < aw) { a = 1; lum = cfg.lum * 0.7; }
+          if (Math.abs(u - (cx + halfW + 0.02)) < aw) { a = 1; lum = cfg.lum * 0.7; }
+        }
+      } else {
+        // hound: low, long, hunched mass in the lower half with a forward head
+        if (v > 0.42) {
+          const backH = 0.30 - Math.abs(u - 0.46) * 0.18;   // arched back
+          if (v > (0.78 - backH) && Math.abs(u - 0.5) < cfg.w + 0.14 * (v - 0.42)) { a = 1; lum = cfg.lum + rnd() * 0.05; }
+        }
+        const hdx = u - 0.74, hdy = v - 0.52;               // head thrust forward
+        if (Math.sqrt(hdx * hdx + hdy * hdy * 1.4) < cfg.hr) { a = 1; lum = cfg.lum * 0.9; }
+        if (v > 0.74 && v < 0.96) {                          // legs
+          for (const lxp of [0.34, 0.5, 0.66, 0.8]) if (Math.abs(u - lxp) < 0.026) { a = 1; lum = cfg.lum * 0.7; }
+        }
+      }
+      out[y * SPR_W + x] = a ? pack(cfg.tone[0] * lum * 4.5, cfg.tone[1] * lum * 4.5, cfg.tone[2] * lum * 4.5, 255) : 0;
+    }
+  }
+  return out;
+}
+
+// ----------------------------------------------------------------------------
+//  Caches
+// ----------------------------------------------------------------------------
+const texCache = new Map();          // zoneIndex -> {walls,floor,ceil}
+const bodyCache = {};                // type -> sprite Uint32Array
+function getBody(type) {
+  if (!bodyCache[type]) bodyCache[type] = makeBody(type);
+  return bodyCache[type];
+}
+function getTextures(level) {
+  const key = level % LEVEL_PALETTES.length;
+  let t = texCache.get(key);
+  if (!t) {
+    const p = getPalette(level);
+    t = {
+      walls: [makeWallpaper(p, 0), makeWallpaper(p, 1), makeWallpaper(p, 2), makeWallpaper(p, 3)],
+      floor: makeCarpet(p), ceil: makeCeiling(p),
+    };
+    texCache.set(key, t);
+  }
+  return t;
+}
+
+let frameBuf = null, frameU32 = null, bufW = 0, bufH = 0;
+function getFrame(ctx) {
+  if (!frameBuf || bufW !== SCREEN_WIDTH || bufH !== SCREEN_HEIGHT) {
+    frameBuf = ctx.createImageData(SCREEN_WIDTH, SCREEN_HEIGHT);
+    frameU32 = new Uint32Array(frameBuf.data.buffer);
+    bufW = SCREEN_WIDTH; bufH = SCREEN_HEIGHT;
+  }
+  return frameBuf;
+}
+
+// ============================================================================
+//  Main render
+// ============================================================================
+let _tick = 0;
+// Deterministic per-cell wall feature so fixtures scatter instead of repeating.
+function cellVariant(mx, my) {
+  const h = (Math.imul(mx, 73856093) ^ Math.imul(my, 19349663)) >>> 0;
+  const r = h % 100;
+  if (r < 70) return 0;   // clean wall (dominant)
+  if (r < 84) return 1;   // electrical outlet
+  if (r < 94) return 2;   // return vent
+  return 3;               // heavy water stain
+}
+
+export function castRays(ctx, world, player, zoneIndex, dread, entities, flashlight = false) {
+  _tick++;
+  const W = SCREEN_WIDTH, H = SCREEN_HEIGHT, halfH = H >> 1;
+  const p = getPalette(zoneIndex);
+  const tex = getTextures(zoneIndex);
+
+  const img = getFrame(ctx);
+  const buf = frameU32;
+
+  const posX = player.x, posY = player.y;
+  const dirX = Math.cos(player.angle), dirY = Math.sin(player.angle);
+  const planeX = -dirY * PLANE_LEN, planeY = dirX * PLANE_LEN;
+
+  // dread colour push (toward red, away from cool)
+  const dr = dread / 100;
+  const rMul = 1 + dr * 0.42, gMul = 1 - dr * 0.26, bMul = 1 - dr * 0.42;
+
+  // flicker: occasional brown-out of the fluorescents
+  let flick = 1;
+  if (((_tick + 13) % 47) < 2) flick = 0.82;
+  if (Math.random() < 0.012) flick = 0.6 + Math.random() * 0.3;
+
+  const fog = p.fog;
+  const useFlash = !!flashlight;
+  const fcx = W * 0.5, fcy = H * 0.55;        // flashlight screen centre
+
+  // ---- floor + ceiling cast (per scanline below the horizon) -------------
+  const rayX0 = dirX - planeX, rayY0 = dirY - planeY;  // leftmost ray
+  const rayX1 = dirX + planeX, rayY1 = dirY + planeY;  // rightmost ray
+  const floorTexF = tex.floor, ceilTexF = tex.ceil;
+
+  for (let y = halfH + 1; y < H; y++) {
+    const pRow = y - halfH;
+    const rowDist = (0.5 * H * WALL_HEIGHT) / pRow;          // distance of this row
+    const stepX = rowDist * (rayX1 - rayX0) / W;
+    const stepY = rowDist * (rayY1 - rayY0) / W;
+    let fx = posX + rowDist * rayX0;
+    let fy = posY + rowDist * rayY0;
+
+    // distance shade (shared by floor & its mirrored ceiling)
+    let shade = 1 - rowDist * 0.058;
+    if (shade < 0) shade = 0;
+    const floorShade = shade * 0.94 * flick;
+    const ceilShade = shade * 1.04 * flick;
+
+    const yCeil = H - y - 1;
+    const rowFloor = y * W, rowCeil = yCeil * W;
+
+    for (let x = 0; x < W; x++, fx += stepX, fy += stepY) {
+      // ---- floor (carpet), tiled every world unit ----
+      let cfx = fx - Math.floor(fx), cfy = fy - Math.floor(fy);
+      let txF = (cfx * TEX) & (TEX - 1), tyF = (cfy * TEX) & (TEX - 1);
+      let fp = floorTexF[tyF * TEX + txF];
+      // ---- ceiling (tiles+lights), tiled every 2 world units ----
+      let hfx = fx * 0.25, hfy = fy * 0.25;
+      let chx = hfx - Math.floor(hfx), chy = hfy - Math.floor(hfy);
+      let txC = (chx * TEX) & (TEX - 1), tyC = (chy * TEX) & (TEX - 1);
+      let cp = ceilTexF[tyC * TEX + txC];
+
+      let bF = floorShade, bC = ceilShade;
+      if (useFlash) {
+        const dxs = x - fcx, dys = y - fcy, dys2 = yCeil - fcy;
+        const coneF = 1.5 - (dxs * dxs + dys * dys) * 0.000085;
+        const coneC = 1.5 - (dxs * dxs + dys2 * dys2) * 0.000085;
+        bF = (floorShade * 0.18) + (coneF > 0 ? coneF : 0) * shade * 1.1;
+        bC = (ceilShade * 0.18) + (coneC > 0 ? coneC : 0) * shade * 1.1;
+      }
+
+      // floor pixel
+      let r = (fp & 0xFF), g = (fp >> 8) & 0xFF, b = (fp >> 16) & 0xFF;
+      r = r * bF; g = g * bF; b = b * bF;
+      // fog blend toward murk at distance
+      const fAmt = 1 - shade;
+      r += (fog[0] - r) * fAmt * 0.7; g += (fog[1] - g) * fAmt * 0.7; b += (fog[2] - b) * fAmt * 0.7;
+      buf[rowFloor + x] = pack(r * rMul, g * gMul, b * bMul);
+
+      // ceiling pixel
+      let r2 = (cp & 0xFF), g2 = (cp >> 8) & 0xFF, b2 = (cp >> 16) & 0xFF;
+      r2 = r2 * bC; g2 = g2 * bC; b2 = b2 * bC;
+      r2 += (fog[0] - r2) * fAmt * 0.7; g2 += (fog[1] - g2) * fAmt * 0.7; b2 += (fog[2] - b2) * fAmt * 0.7;
+      buf[rowCeil + x] = pack(r2 * rMul, g2 * gMul, b2 * bMul);
+    }
+  }
+
+  // ---- wall cast ----------------------------------------------------------
+  const zBuf = new Float32Array(W);
+
+  for (let x = 0; x < W; x++) {
+    const cameraX = 2 * x / W - 1;
+    const rdX = dirX + planeX * cameraX;
+    const rdY = dirY + planeY * cameraX;
+
+    let mapX = Math.floor(posX), mapY = Math.floor(posY);
+    const ddX = rdX === 0 ? 1e30 : Math.abs(1 / rdX);
+    const ddY = rdY === 0 ? 1e30 : Math.abs(1 / rdY);
+
+    let stepX, stepY, sideX, sideY;
+    if (rdX < 0) { stepX = -1; sideX = (posX - mapX) * ddX; }
+    else { stepX = 1; sideX = (mapX + 1 - posX) * ddX; }
+    if (rdY < 0) { stepY = -1; sideY = (posY - mapY) * ddY; }
+    else { stepY = 1; sideY = (mapY + 1 - posY) * ddY; }
+
+    let hit = 0, side = 0, steps = 96;
+    while (!hit && steps-- > 0) {
+      if (sideX < sideY) { sideX += ddX; mapX += stepX; side = 0; }
+      else { sideY += ddY; mapY += stepY; side = 1; }
+      if (world.isWall(mapX, mapY)) hit = 1;
+    }
+    if (!hit) hit = 2;
+
+    let perp;
+    if (hit === 2) perp = MAX_DEPTH;
+    else perp = side === 0 ? (sideX - ddX) : (sideY - ddY);
+    if (perp < 0.0001) perp = 0.0001;
+    zBuf[x] = perp;
+
+    const lineH = (H * WALL_HEIGHT / perp) | 0;
+    let dStart = -(lineH >> 1) + halfH;
+    let dEnd = (lineH >> 1) + halfH;
+    const drawS = dStart < 0 ? 0 : dStart;
+    const drawE = dEnd >= H ? H - 1 : dEnd;
+
+    if (hit === 2) {
+      // void column -> fill with fog so it reads as distance, not a hole
+      for (let y = drawS; y <= drawE; y++) buf[y * W + x] = pack(fog[0] * rMul, fog[1] * gMul, fog[2] * bMul);
+      continue;
+    }
+
+    // texture X coordinate on the wall
+    let wallX = side === 0 ? posY + perp * rdY : posX + perp * rdX;
+    wallX -= Math.floor(wallX);
+    let texX = (wallX * TEX) | 0;
+    if (side === 0 && rdX > 0) texX = TEX - texX - 1;
+    if (side === 1 && rdY < 0) texX = TEX - texX - 1;
+    if (texX < 0) texX = 0; if (texX > TEX - 1) texX = TEX - 1;
+
+    // distance shade + side darkening
+    let shade = 1 - perp * 0.055;
+    if (shade < 0.05) shade = 0.05;
+    if (side === 1) shade *= 0.74;
+    shade *= flick;
+
+    let cone = 1;
+    if (useFlash) {
+      const dxs = x - fcx;
+      cone = 1.45 - (dxs * dxs) * 0.000085;
+      if (cone < 0) cone = 0;
+    }
+
+    const texStep = TEX / lineH;
+    let texPos = (drawS - halfH + (lineH >> 1)) * texStep;
+    const wtex = tex.walls[cellVariant(mapX, mapY)];
+    const fAmt = 1 - (1 - perp * 0.055 < 0.05 ? 0.05 : 1 - perp * 0.055);
+
+    for (let y = drawS; y <= drawE; y++) {
+      let ty = texPos & (TEX - 1);
+      texPos += texStep;
+      const px = wtex[ty * TEX + texX];
+      let r = (px & 0xFF), g = (px >> 8) & 0xFF, b = (px >> 16) & 0xFF;
+      let bri = shade;
+      if (useFlash) {
+        const dys = y - fcy;
+        let c = cone - (dys * dys) * 0.000085;
+        if (c < 0) c = 0;
+        bri = (shade * 0.16) + c * (1 - perp * 0.05 < 0 ? 0 : 1 - perp * 0.05) * 1.1;
+      }
+      r = r * bri; g = g * bri; b = b * bri;
+      r += (fog[0] - r) * fAmt * 0.7; g += (fog[1] - g) * fAmt * 0.7; b += (fog[2] - b) * fAmt * 0.7;
+      buf[y * W + x] = pack(r * rMul, g * gMul, b * bMul);
+    }
+  }
+
+  // ---- entities (billboards, z-tested, drawn far-to-near) ----------------
+  if (entities && entities.length) {
+    drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, entities, zBuf, dread, flick);
+  }
+
+  ctx.putImageData(img, 0, 0);
+
+  // ---- light/film grain overlay (cheap ctx pass) -------------------------
+  if (flick < 0.85) {
+    ctx.fillStyle = 'rgba(0,0,0,' + ((1 - flick) * 0.5).toFixed(3) + ')';
+    ctx.fillRect(0, 0, W, H);
+  }
+}
+
+function drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, ents, zBuf, dread, flick) {
+  const invDet = 1 / (planeX * dirY - dirX * planeY);
+  // project + sort far -> near so nearer entities overdraw correctly
+  const draw = [];
+  for (const e of ents) {
+    const sx = e.x - posX, sy = e.y - posY;
+    const tY = invDet * (-planeY * sx + planeX * sy);   // depth
+    if (tY <= 0.2) continue;
+    const tX = invDet * (dirY * sx - dirX * sy);
+    draw.push({ e, tX, tY });
+  }
+  draw.sort((a, b) => b.tY - a.tY);
+
+  const halfH = H >> 1;
+  const dr = dread / 100;
+  for (const { e, tX, tY } of draw) {
+    const body = getBody(e.type);
+    const screenX = ((W / 2) * (1 + tX / tY)) | 0;
+    // hounds read low & wide; others tall
+    const vscale = e.type === 'hound' ? 0.72 : 1.06;
+    const sH = (Math.abs(H / tY) * vscale) | 0;
+    const sW = (sH * SPR_W / SPR_H) | 0;
+    // sit feet near the floor line rather than centring on the horizon
+    const footY = halfH + (Math.abs(H / tY) * WALL_HEIGHT * 0.5) | 0;
+    const drawStartY = footY - sH;
+    const drawStartX = screenX - (sW >> 1);
+    const shade = Math.max(0.16, 1 - tY * 0.07) * (0.85 + flick * 0.15);
+    const aggro = e.type === 'hound' || dr > 0.5;
+
+    for (let stripe = 0; stripe < sW; stripe++) {
+      const x = drawStartX + stripe;
+      if (x < 0 || x >= W) continue;
+      if (tY >= zBuf[x]) continue;                 // occluded by wall
+      const texX = (stripe * SPR_W / sW) | 0;
+      for (let yy = 0; yy < sH; yy++) {
+        const y = drawStartY + yy;
+        if (y < 0 || y >= H) continue;
+        const texY = (yy * SPR_H / sH) | 0;
+        const sp = body[texY * SPR_W + texX];
+        if ((sp >>> 24) === 0) continue;
+        let r = (sp & 0xFF) * shade, g = ((sp >> 8) & 0xFF) * shade, b = ((sp >> 16) & 0xFF) * shade;
+        if (aggro) { r += 26 * (e.type === 'hound' ? 1 : dr); }
+        buf[y * W + x] = pack(r, g, b, 255);
+      }
+    }
+
+    // ---- glowing features per type ----
+    const eyeRed = aggro || e.dist < 4;
+    const drawDot = (cxp, cyp, rad, col) => {
+      const ex = (screenX + cxp * sW) | 0, ey = (drawStartY + cyp * sH) | 0;
+      for (let oy = -rad; oy <= rad; oy++) for (let ox = -rad; ox <= rad; ox++) {
+        const px = ex + ox, py = ey + oy;
+        if (px >= 0 && px < W && py >= 0 && py < H && tY < zBuf[px]) buf[py * W + px] = col;
+      }
+    };
+    const ew = Math.max(0, (sW * 0.03) | 0);
+    if (e.type === 'wanderer') {
+      // faceless — faint hollow eyes only when close
+      if (e.dist < 6) { const c = pack(150, 140, 110); drawDot(-0.10, 0.12, ew, c); drawDot(0.10, 0.12, ew, c); }
+    } else if (e.type === 'watcher') {
+      const c = eyeRed ? pack(255, 40, 24) : pack(245, 210, 80);
+      drawDot(-0.09, 0.10, ew, c); drawDot(0.09, 0.10, ew, c);
+    } else if (e.type === 'smiler') {
+      const lit = 0.4 + (e.glow || 0) * 0.6;
+      const cEye = pack(220 * lit, 235 * lit, 220 * lit);
+      drawDot(-0.10, 0.20, ew, cEye); drawDot(0.10, 0.20, ew, cEye);
+      // wide grin: a row of bright teeth
+      const gy = (drawStartY + 0.27 * sH) | 0, gw = (sW * 0.22) | 0;
+      const gx0 = screenX - (gw >> 1);
+      for (let i = 0; i <= gw; i++) {
+        const px = gx0 + i; if (px < 0 || px >= W || tY >= zBuf[px]) continue;
+        const teeth = (i % 3 === 0) ? 0.7 : 1;                   // tooth gaps
+        const curve = Math.sin((i / gw) * Math.PI) * (sH * 0.03);
+        const py = (gy - curve) | 0;
+        if (py >= 0 && py < H) buf[py * W + px] = pack(235 * lit * teeth, 240 * lit * teeth, 225 * lit * teeth);
+      }
+    } else if (e.type === 'hound') {
+      const c = pack(255, 30, 18);
+      drawDot(0.12, 0.50, Math.max(1, ew), c); drawDot(0.20, 0.52, Math.max(1, ew), c);  // forward-set eyes
+    }
+  }
+}
+
+// ----------------------------------------------------------------------------
+//  Minimap (top-left) — a local window onto the infinite world.
+// ----------------------------------------------------------------------------
+export function renderMinimap(ctx, world, player, entities) {
+  const CELL = 4, R = 9;                 // show (2R+1)^2 cells around the player
+  const dim = (2 * R + 1) * CELL, ox = 6, oy = SCREEN_HEIGHT - dim - 6;
+  const pcx = Math.floor(player.x), pcy = Math.floor(player.y);
+  ctx.fillStyle = 'rgba(0,0,0,0.72)';
+  ctx.fillRect(ox - 2, oy - 2, dim + 4, dim + 4);
+  for (let dy = -R; dy <= R; dy++) {
+    for (let dx = -R; dx <= R; dx++) {
+      const gx = pcx + dx, gy = pcy + dy;
+      const sxp = ox + (dx + R) * CELL, syp = oy + (dy + R) * CELL;
+      if (world.isWall(gx, gy)) ctx.fillStyle = '#c8b85f';
+      else if (world.isSafeRoom && world.isSafeRoom(gx, gy)) ctx.fillStyle = '#16361c';
+      else ctx.fillStyle = '#1c1808';
+      ctx.fillRect(sxp, syp, CELL - 1, CELL - 1);
+    }
+  }
+  // entity blips
+  if (entities) {
+    for (const e of entities) {
+      const dx = Math.floor(e.x) - pcx, dy = Math.floor(e.y) - pcy;
+      if (Math.abs(dx) > R || Math.abs(dy) > R) continue;
+      ctx.fillStyle = e.type === 'hound' ? '#ff3020' : e.type === 'smiler' ? '#e8e8e8' : e.type === 'watcher' ? '#ffd23a' : '#9a8fb0';
+      ctx.fillRect(ox + (dx + R) * CELL, oy + (dy + R) * CELL, CELL, CELL);
+    }
+  }
+  // player + facing
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(ox + R * CELL, oy + R * CELL, CELL, CELL);
+  ctx.fillStyle = '#ff9a3a';
+  ctx.fillRect(
+    ox + (R + Math.round(Math.cos(player.angle))) * CELL,
+    oy + (R + Math.round(Math.sin(player.angle))) * CELL, 2, 2);
+}
