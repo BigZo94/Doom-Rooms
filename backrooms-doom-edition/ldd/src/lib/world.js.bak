@@ -127,21 +127,8 @@ export function createWorld(seed = (Math.random() * 1e9) | 0) {
     return (hash2(bx, by, S ^ 0xCAFE) % 100) < 6;     // ~6% of rooms
   }
 
-  // "Dark room": some rooms have dead fluorescents and sit in near-blackness.
-  // Returns 0 for a normally-lit room, up to 1 for pitch black. Safe rooms are
-  // never dark. ~16% of rooms are dark, and of those the darkest are rare, so
-  // most of the world stays lit and the flashlight matters only in pockets.
-  function darkness(gx, gy) {
-    const bx = Math.floor(gx / B), by = Math.floor(gy / B);
-    if (isSafeRoom(gx, gy)) return 0;
-    const h = hash2(bx, by, S ^ 0xDA12) % 100;
-    if (h >= 16) return 0;                              // 84% normally lit
-    // map the unlucky 0..15 bucket onto 0.7..1.0 darkness (deep gloom..black)
-    return 0.7 + (h / 16) * 0.3;
-  }
-
   return {
-    seed: S, isWall, isOpen, openCellNear, zoneAt, almondsNear, almondInRoom, isSafeRoom, darkness,
+    seed: S, isWall, isOpen, openCellNear, zoneAt, almondsNear, almondInRoom, isSafeRoom,
     BLOCK: B,
   };
 }

@@ -111,7 +111,7 @@ export default function GameEngine({ onBackToTitle }) {
       const canvas = canvasRef.current;
       if (canvas) {
         const ctx = canvas.getContext('2d');
-        castRays(ctx, world, p, zone, 100 - g.sanity, g.sim.physical, g.flashlight, recording);
+        castRays(ctx, world, p, zone, 100 - g.sanity, g.sim.physical, g.flashlight);
         if (g.showMinimap) renderMinimap(ctx, world, p, g.sim.physical);
       }
 

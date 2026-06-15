@@ -156,14 +156,6 @@ export function createChunkManager(seed = (Math.random() * 1e9) | 0, opts = {}) 
   const ZONE = 40;
   const zoneAt = (gx, gy) => hash2(Math.floor(gx / ZONE), Math.floor(gy / ZONE), S ^ 0xABCD) % 6;
   const isSafeRoom = (gx, gy) => (hash2(Math.floor(gx / B), Math.floor(gy / B), S ^ 0xCAFE) % 100) < 6;
-  // Dark rooms: ~16% of rooms have dead fluorescents (0 = lit .. 1 = pitch
-  // black). Safe rooms are always lit. Mirrors world.js darkness().
-  function darkness(gx, gy) {
-    if (isSafeRoom(gx, gy)) return 0;
-    const h = hash2(Math.floor(gx / B), Math.floor(gy / B), S ^ 0xDA12) % 100;
-    if (h >= 16) return 0;
-    return 0.7 + (h / 16) * 0.3;
-  }
 
   function almondInRoom(bx, by) {
     if (takenItems.has('al:' + bx + ',' + by)) return null;
@@ -199,7 +191,7 @@ export function createChunkManager(seed = (Math.random() * 1e9) | 0, opts = {}) 
   return {
     seed: S, BLOCK: B, CHUNK,
     update, isWall, isOpen, setCell, openCellNear,
-    zoneAt, isSafeRoom, darkness, almondsNear, takeItem,
+    zoneAt, isSafeRoom, almondsNear, takeItem,
     stats, serialize, load,
   };
 }

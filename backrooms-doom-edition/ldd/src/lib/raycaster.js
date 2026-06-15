@@ -482,6 +482,38 @@ function getFrame(ctx) {
   return frameBuf;
 }
 
+// Camcorder lens: precomputed barrel-distortion remap (dest index -> src
+// index, or -1 for "outside the lens"). Built once per screen size. K is the
+// barrel strength — moderate, so it clearly reads as a lens without the
+// extreme GoPro wrap.
+let lensMap = null, lensW = 0, lensH = 0, lensScratch = null;
+function getLensMap(W, H) {
+  if (lensMap && lensW === W && lensH === H) return lensMap;
+  const K = 0.22;                          // moderate barrel
+  const cx = (W - 1) / 2, cy = (H - 1) / 2;
+  const norm = 1 / Math.hypot(cx, cy);     // so the corner radius is ~1
+  const m = new Int32Array(W * H);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      // normalized offset from centre
+      const nx = (x - cx) * norm, ny = (y - cy) * norm;
+      const r2 = nx * nx + ny * ny;
+      // barrel: sample point pulled inward by (1 + K*r^2)
+      const f = 1 + K * r2;
+      const sxN = nx * f, syN = ny * f;
+      const sx = Math.round(cx + sxN / norm);
+      const sy = Math.round(cy + syN / norm);
+      m[y * W + x] = (sx < 0 || sx >= W || sy < 0 || sy >= H) ? -1 : (sy * W + sx);
+    }
+  }
+  lensMap = m; lensW = W; lensH = H;
+  return m;
+}
+function getLensScratch(W, H) {
+  if (!lensScratch || lensScratch.length !== W * H) lensScratch = new Uint32Array(W * H);
+  return lensScratch;
+}
+
 // ============================================================================
 //  Main render
 // ============================================================================
@@ -496,7 +528,7 @@ function cellVariant(mx, my) {
   return 3;               // heavy water stain
 }
 
-export function castRays(ctx, world, player, zoneIndex, dread, entities, flashlight = false) {
+export function castRays(ctx, world, player, zoneIndex, dread, entities, flashlight = false, camcorder = false) {
   _tick++;
   const W = SCREEN_WIDTH, H = SCREEN_HEIGHT, halfH = H >> 1;
   const p = getPalette(zoneIndex);
@@ -521,6 +553,28 @@ export function castRays(ctx, world, player, zoneIndex, dread, entities, flashli
   const fog = p.fog;
   const useFlash = !!flashlight;
   const fcx = W * 0.5, fcy = H * 0.55;        // flashlight screen centre
+
+  // ---- area darkness: dead-fluorescent rooms sit in near-blackness. ------
+  //  `dk` (0 lit .. 1 pitch black) sampled at the player's cell. Without the
+  //  flashlight this crushes ambient light so you must switch it on; the
+  //  flashlight cone (below) still punches through. We blend across the cell
+  //  the player is in plus its neighbours so the transition at a doorway is a
+  //  gradient rather than a hard step.
+  let dk = 0;
+  if (world.darkness) {
+    const px = Math.floor(player.x), py = Math.floor(player.y);
+    let s = 0, n = 0;
+    for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++) {
+      const w = (ox === 0 && oy === 0) ? 4 : 1;
+      s += world.darkness(px + ox, py + oy) * w; n += w;
+    }
+    dk = s / n;
+  }
+  // ambient multiplier applied to the whole scene when the light is off.
+  const ambient = 1 - dk * 0.92;                       // dark room -> ~0.08
+  // the flashlight is what makes a dark room navigable, so its cone gets a
+  // boost proportional to how dark the room is.
+  const flashBoost = 1 + dk * 0.6;
 
   // ---- floor + ceiling cast (per scanline below the horizon) -------------
   const rayX0 = dirX - planeX, rayY0 = dirY - planeY;  // leftmost ray
@@ -555,13 +609,13 @@ export function castRays(ctx, world, player, zoneIndex, dread, entities, flashli
       let txC = (chx * TEX) & (TEX - 1), tyC = (chy * TEX) & (TEX - 1);
       let cp = ceilTexF[tyC * TEX + txC];
 
-      let bF = floorShade, bC = ceilShade;
+      let bF = floorShade * ambient, bC = ceilShade * ambient;
       if (useFlash) {
         const dxs = x - fcx, dys = y - fcy, dys2 = yCeil - fcy;
         const coneF = 1.5 - (dxs * dxs + dys * dys) * 0.000085;
         const coneC = 1.5 - (dxs * dxs + dys2 * dys2) * 0.000085;
-        bF = (floorShade * 0.18) + (coneF > 0 ? coneF : 0) * shade * 1.1;
-        bC = (ceilShade * 0.18) + (coneC > 0 ? coneC : 0) * shade * 1.1;
+        bF = (floorShade * 0.18 * ambient) + (coneF > 0 ? coneF : 0) * shade * 1.1 * flashBoost;
+        bC = (ceilShade * 0.18 * ambient) + (coneC > 0 ? coneC : 0) * shade * 1.1 * flashBoost;
       }
 
       // floor pixel
@@ -638,6 +692,11 @@ export function castRays(ctx, world, player, zoneIndex, dread, entities, flashli
     if (side === 1) shade *= 0.74;
     shade *= flick;
 
+    // this wall belongs to a room that may be dark — shade by ITS darkness,
+    // so a lit corridor still glows when viewed from a dark room and vice versa.
+    let wallAmbient = 1;
+    if (world.darkness) wallAmbient = 1 - world.darkness(mapX, mapY) * 0.92;
+
     let cone = 1;
     if (useFlash) {
       const dxs = x - fcx;
@@ -655,12 +714,12 @@ export function castRays(ctx, world, player, zoneIndex, dread, entities, flashli
       texPos += texStep;
       const px = wtex[ty * TEX + texX];
       let r = (px & 0xFF), g = (px >> 8) & 0xFF, b = (px >> 16) & 0xFF;
-      let bri = shade;
+      let bri = shade * wallAmbient;
       if (useFlash) {
         const dys = y - fcy;
         let c = cone - (dys * dys) * 0.000085;
         if (c < 0) c = 0;
-        bri = (shade * 0.16) + c * (1 - perp * 0.05 < 0 ? 0 : 1 - perp * 0.05) * 1.1;
+        bri = (shade * 0.16 * wallAmbient) + c * (1 - perp * 0.05 < 0 ? 0 : 1 - perp * 0.05) * 1.1 * flashBoost;
       }
       r = r * bri; g = g * bri; b = b * bri;
       r += (fog[0] - r) * fAmt * 0.7; g += (fog[1] - g) * fAmt * 0.7; b += (fog[2] - b) * fAmt * 0.7;
@@ -670,7 +729,22 @@ export function castRays(ctx, world, player, zoneIndex, dread, entities, flashli
 
   // ---- entities (billboards, z-tested, drawn far-to-near) ----------------
   if (entities && entities.length) {
-    drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, entities, zBuf, dread, flick);
+    drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, entities, zBuf, dread, flick, ambient, useFlash, flashBoost, fcx, fcy);
+  }
+
+  // ---- camcorder lens: a moderate barrel (fisheye) warp of the whole frame.
+  //  Real camcorders have a wide, slightly-bulged lens; this remaps the
+  //  rendered buffer through a barrel function so the picture noticeably
+  //  bows out toward the edges while recording (vs the flat raw view).
+  if (camcorder) {
+    const map = getLensMap(W, H);
+    const src = getLensScratch(W, H);
+    src.set(buf);                                  // snapshot before remapping
+    const edge = pack(6, 10, 6, 255);              // dark vignette beyond the lens
+    for (let i = 0; i < map.length; i++) {
+      const s = map[i];
+      buf[i] = s < 0 ? edge : src[s];
+    }
   }
 
   ctx.putImageData(img, 0, 0);
@@ -682,7 +756,7 @@ export function castRays(ctx, world, player, zoneIndex, dread, entities, flashli
   }
 }
 
-function drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, ents, zBuf, dread, flick) {
+function drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, ents, zBuf, dread, flick, ambient = 1, useFlash = false, flashBoost = 1, fcx = W * 0.5, fcy = H * 0.55) {
   const invDet = 1 / (planeX * dirY - dirX * planeY);
   // project + sort far -> near so nearer entities overdraw correctly
   const draw = [];
@@ -708,7 +782,18 @@ function drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, ents, z
     const footY = halfH + (Math.abs(H / tY) * WALL_HEIGHT * 0.5) | 0;
     const drawStartY = footY - sH;
     const drawStartX = screenX - (sW >> 1);
-    const shade = Math.max(0.16, 1 - tY * 0.07) * (0.85 + flick * 0.15);
+    let shade = Math.max(0.16, 1 - tY * 0.07) * (0.85 + flick * 0.15);
+    // in a dark room the body is swallowed by gloom; the flashlight, if the
+    // entity sits within its cone, picks it back out. (Glowing eyes/grin are
+    // drawn afterwards and stay visible — a shape's eyes in the dark.)
+    if (useFlash) {
+      const dxs = screenX - fcx, dys = footY - (sH >> 1) - fcy;
+      let c = 1.45 - (dxs * dxs + dys * dys) * 0.000085;
+      if (c < 0) c = 0;
+      shade *= Math.min(1.1, ambient + c * flashBoost);
+    } else {
+      shade *= ambient;
+    }
     const aggro = e.type === 'hound' || dr > 0.5;
 
     for (let stripe = 0; stripe < sW; stripe++) {

@@ -138,19 +138,11 @@ export function stepActive(world, e, player, ctx, cb, steer, dt) {
     if (e.type === 'wanderer' || e.type === 'hound') e.wanderA = used;
   }
 
-  // Sanity drain: an entity only frays you when you can SEE it (on screen,
-  // line-of-sight) or when it is right on top of you (a felt presence in the
-  // dark). Distant off-screen entities no longer bleed sanity — that read as
-  // "getting hurt for no reason".
-  const PERSONAL = 4;                      // cells: "I can feel it near me"
-  if (onScreen || dist < PERSONAL) {
-    // base falloff over sense range, but only counts inside the gate above
+  if (dist < P.sense) {
     let drain = P.sanityNear * (1 - dist / P.sense);
-    if (drain < 0) drain = 0;
-    if (!onScreen) drain *= 0.5;           // unseen-but-close: half effect
     if (e.type === 'smiler' && onScreen) drain *= 2.2;
     if (e.type === 'watcher' && onScreen) drain *= 0.4;
-    if (drain > 0) cb.onContact && cb.onContact({ type: e.type, sanity: drain * k * 0.05, health: 0 });
+    cb.onContact && cb.onContact({ type: e.type, sanity: drain * k * 0.05, health: 0 });
   }
   if (dist < 0.6) {
     cb.onContact && cb.onContact({ type: e.type, health: P.contactHealth * k * 0.08, sanity: P.contactSanity * k * 0.08 });
