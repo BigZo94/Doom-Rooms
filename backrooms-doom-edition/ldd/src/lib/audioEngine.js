@@ -462,34 +462,47 @@ export function setMasterVolume(v) {
   ramp(master.gain, 0.5 * vol, 0.1);
 }
 
-// Flashlight-gun discharge: an electrical zap/crack + a short sub thump, with
-// a tiny pitch-randomized tail so repeats don't sound identical.
-export function playGunSound(hit = false) {
+// Pistol discharge: a sharp percussive crack (fast noise transient through a
+// highpass) + a short low-mid body thump, with a faint tail. `empty` plays a
+// dry hammer click instead. `hit` adds a metallic impact ring.
+export function playGunSound(hit = false, empty = false) {
   if (!ctx) return;
   try {
     const now = T();
-    // crack: short bright noise burst, highpass-ish via bandpass
-    const ng = ctx.createGain();
-    ng.gain.setValueAtTime(0.22, now); ng.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
-    const ns = ctx.createBufferSource(); ns.buffer = noiseBuffer(0.16);
-    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 1.2;
-    bp.frequency.setValueAtTime(3200 + Math.random() * 800, now);
-    bp.frequency.exponentialRampToValueAtTime(1200, now + 0.16);
-    ns.connect(bp); bp.connect(ng); spawnToRoom(ng, 0.5); ns.start(now); ns.stop(now + 0.17);
-    // body: a short electric tone sweep
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0.16, now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
-    const o = ctx.createOscillator(); o.type = 'square';
-    o.frequency.setValueAtTime(420 + Math.random() * 80, now); o.frequency.exponentialRampToValueAtTime(90, now + 0.16);
-    o.connect(g); spawnToRoom(g, 0.3); o.start(now); o.stop(now + 0.19);
-    // hit confirm: a short metallic ring layered on top
+    if (empty) {
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0.12, now); g.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+      const ns = ctx.createBufferSource(); ns.buffer = noiseBuffer(0.05);
+      const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 2500;
+      ns.connect(hp); hp.connect(g); spawnToRoom(g, 0.2); ns.start(now); ns.stop(now + 0.06);
+      return;
+    }
+    // crack: a very fast, bright noise transient = the report
+    const cg = ctx.createGain();
+    cg.gain.setValueAtTime(0.55, now); cg.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+    const cn = ctx.createBufferSource(); cn.buffer = noiseBuffer(0.12);
+    const chp = ctx.createBiquadFilter(); chp.type = 'highpass'; chp.frequency.value = 1400;
+    cn.connect(chp); chp.connect(cg); spawnToRoom(cg, 0.6); cn.start(now); cn.stop(now + 0.13);
+    // body: a short punchy low-mid thump (the gun's weight)
+    const bg = ctx.createGain();
+    bg.gain.setValueAtTime(0.4, now); bg.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+    const bo = ctx.createOscillator(); bo.type = 'triangle';
+    bo.frequency.setValueAtTime(220, now); bo.frequency.exponentialRampToValueAtTime(60, now + 0.12);
+    bo.connect(bg); spawnToRoom(bg, 0.4); bo.start(now); bo.stop(now + 0.19);
+    // sub kick for chest weight
+    const sg = ctx.createGain();
+    sg.gain.setValueAtTime(0.3, now); sg.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+    const so = ctx.createOscillator(); so.type = 'sine';
+    so.frequency.setValueAtTime(90, now); so.frequency.exponentialRampToValueAtTime(40, now + 0.1);
+    so.connect(sg); spawnToRoom(sg, 0.2); so.start(now); so.stop(now + 0.15);
+    // hit confirm: brief metallic ring
     if (hit) {
       const hg = ctx.createGain();
-      hg.gain.setValueAtTime(0.12, now + 0.01); hg.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
-      const ho = ctx.createOscillator(); ho.type = 'triangle'; ho.frequency.value = 1800;
-      const ho2 = ctx.createOscillator(); ho2.type = 'triangle'; ho2.frequency.value = 1800 * 1.48;
+      hg.gain.setValueAtTime(0.1, now + 0.01); hg.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+      const ho = ctx.createOscillator(); ho.type = 'triangle'; ho.frequency.value = 1700;
+      const ho2 = ctx.createOscillator(); ho2.type = 'triangle'; ho2.frequency.value = 1700 * 1.5;
       ho.connect(hg); ho2.connect(hg); spawnToRoom(hg, 0.7);
-      ho.start(now); ho.stop(now + 0.42); ho2.start(now); ho2.stop(now + 0.42);
+      ho.start(now); ho.stop(now + 0.37); ho2.start(now); ho2.stop(now + 0.37);
     }
   } catch (e) {}
 }

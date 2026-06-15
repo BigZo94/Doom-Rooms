@@ -2,7 +2,7 @@ import React from 'react';
 
 const ENTITY_NAMES = { wanderer: 'Wanderer', watcher: 'Watcher', smiler: 'Smiler', hound: 'Hound' };
 
-export default function HUD({ sanity, health, almonds, documented, zoneName, flashlight, camcorder, message }) {
+export default function HUD({ sanity, health, almonds, documented, zoneName, flashlight, camcorder, message, mag = 0, reserve = 0, reloading = false }) {
   const san = Math.min(100, Math.max(0, sanity));
   const hp = Math.min(100, Math.max(0, health));
   const sanCol = san > 66 ? '#3a8a00' : san > 33 ? '#e08000' : '#cc2200';
@@ -58,18 +58,18 @@ export default function HUD({ sanity, health, almonds, documented, zoneName, fla
         )}
       </div>
 
-      {/* Crosshair (hidden while camcorder reticle is up) */}
-      {!camcorder && (
-        <div className="absolute inset-0 flex items-center justify-center">
-          <div style={{ position: 'relative', width: 12, height: 12 }}>
-            <div style={{ position: 'absolute', top: '50%', left: 0, right: 0, height: 1, background: 'rgba(200,181,96,0.45)', transform: 'translateY(-50%)' }} />
-            <div style={{ position: 'absolute', left: '50%', top: 0, bottom: 0, width: 1, background: 'rgba(200,181,96,0.45)', transform: 'translateX(-50%)' }} />
-          </div>
+      {/* Crosshair is drawn by GameEngine (respects the settings toggle). */}
+
+      {/* Ammo readout (bottom-right, classic FPS placement) */}
+      <div className="absolute" style={{ bottom: 18, right: 14, textAlign: 'right' }}>
+        <div style={{ color: reloading ? '#e08000' : '#d8c870', fontSize: 18, letterSpacing: '0.08em', textShadow: '0 0 10px #00000099', fontFamily: 'monospace' }}>
+          {reloading ? 'RELOADING' : `${mag} / ${reserve}`}
         </div>
-      )}
+        <div style={{ color: '#6b6440', fontSize: 6, letterSpacing: '0.15em', marginTop: 2 }}>PISTOL &middot; [R] RELOAD</div>
+      </div>
 
       {/* Flashlight + camcorder indicators */}
-      <div className="absolute bottom-8 right-3 text-right" style={{ fontSize: 6, letterSpacing: '0.15em' }}>
+      <div className="absolute bottom-8 right-3 text-right" style={{ fontSize: 6, letterSpacing: '0.15em', marginBottom: 26 }}>
         {flashlight && <div style={{ color: '#e8d870', textShadow: '0 0 8px #e8d87088' }}>{'\u25C9'} FLASHLIGHT [F]</div>}
         {camcorder && <div style={{ color: '#7CFC7C', marginTop: 3 }}>{'\u25C9'} CAMERA [C]</div>}
       </div>
@@ -88,11 +88,13 @@ export default function HUD({ sanity, health, almonds, documented, zoneName, fla
       >
   <div>WASD - Move</div>
   <div>Mouse - Look</div>
+  <div>Click - Fire</div>
+  <div>R - Reload</div>
   <div>Shift - Sprint</div>
   <div>F - Flashlight</div>
   <div>C - Camcorder</div>
   <div>E - Drink Almond Water</div>
-  <div>M - Minimap</div>
+  <div>M - Minimap &middot; ESC - Menu</div>
 </div>
 
       {/* Event message */}

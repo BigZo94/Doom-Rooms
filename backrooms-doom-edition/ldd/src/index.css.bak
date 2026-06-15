@@ -189,10 +189,3 @@ canvas {
   100% { opacity: 0; }
 }
 .entity-flash { animation: entityFlash 0.8s ease forwards; }
-
-@keyframes gunRecoil {
-  0%   { transform: translate(-50%, 14%); }
-  18%  { transform: translate(-50%, 38%) rotate(-2deg); }
-  100% { transform: translate(-50%, 14%); }
-}
-.gun-recoil { animation: gunRecoil 0.16s ease-out; }

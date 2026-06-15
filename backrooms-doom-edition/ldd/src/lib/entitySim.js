@@ -104,7 +104,8 @@ export function createEntitySim(world, opts = {}) {
   }
 
   function targetPop(sanity) {
-    return Math.round(8 + (100 - sanity) / 100 * 6);   // 8..14, more as you fray
+    // base 8..14, scaled up 1.5% per the latest tuning pass
+    return Math.round((8 + (100 - sanity) / 100 * 6) * 1.015);
   }
 
   function initialState(type) {

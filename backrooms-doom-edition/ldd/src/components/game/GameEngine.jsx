@@ -24,12 +24,15 @@ const HEALTH_DRAIN = 6;       // %/sec while sanity is at 0
 const HEALTH_REGEN = 1.2;     // %/sec while sanity is comfortably high
 const HEALTH_REGEN_ABOVE = 50;// sanity must exceed this for health to recover
 
-// ---- weapon (flashlight-gun) ----
-const GUN_DMG = 26;           // per shot; monsters are tanky (hp 120-240)
-const GUN_COST = 5;           // battery % per shot
-const GUN_COOLDOWN = 180;     // ms between shots
+// ---- weapon (pistol) ----
+const GUN_DMG = 34;           // per shot; monsters are tanky (hp 120-240)
+const GUN_COOLDOWN = 230;     // ms between shots (semi-auto)
+const MAG_SIZE = 12;          // rounds per magazine
+const START_RESERVE = 48;     // spare rounds at spawn
+const RELOAD_MS = 1300;       // reload time
+const AMMO_PICKUP = 18;       // rounds per ammo pickup (reuses almond pickups)
 
-const DEFAULT_SETTINGS = { brightness: 1, volume: 0.8, mouseSens: 1, fov: 75, crosshair: true };
+const DEFAULT_SETTINGS = { brightness: 1, volume: 0.8, mouseSens: 1, fov: 90, crosshair: true };
 
 function spawnWorld() {
   const world = createChunkManager((Math.random() * 1e9) | 0, { loadRadius: 4, unloadRadius: 6, budgetMs: 2 });
@@ -48,9 +51,10 @@ export default function GameEngine({ onBackToTitle }) {
     sanity: 100, health: 100, almonds: 0, battery: 100, flashlight: false, camcorder: false,
     showMinimap: false, stepTimer: 0, px: 0, py: 0, msg: '', msgUntil: 0,
     gunTimer: 0, muzzle: 0, hitFlash: 0, paused: false, settings: { ...DEFAULT_SETTINGS },
+    mag: MAG_SIZE, reserve: START_RESERVE, reloading: 0,
   };
 
-  const [ui, setUi] = useState({ sanity: 100, health: 100, almonds: 0, battery: 100, documented: {}, zone: ZONE_NAMES[0], message: '' });
+  const [ui, setUi] = useState({ sanity: 100, health: 100, almonds: 0, battery: 100, mag: MAG_SIZE, reserve: START_RESERVE, reloading: false, documented: {}, zone: ZONE_NAMES[0], message: '' });
   const [flashlight, setFlashlight] = useState(false);
   const [camcorder, setCamcorder] = useState(false);
   const [, setShowMinimap] = useState(false);
@@ -59,6 +63,7 @@ export default function GameEngine({ onBackToTitle }) {
   const [paused, setPaused] = useState(false);
   const [settings, setSettings] = useState({ ...DEFAULT_SETTINGS });
   const [deathCause, setDeathCause] = useState(null);
+  const [gunKick, setGunKick] = useState(0);     // increments per shot to retrigger recoil anim
   const rafRef = useRef(null);
   const uiAccum = useRef(0);
 
@@ -72,16 +77,23 @@ export default function GameEngine({ onBackToTitle }) {
     g.sanity = 100; g.health = 100; g.almonds = 0; g.battery = 100;
   }, []);
 
-  // fire the flashlight-gun (uses battery as ammo)
+  // fire the pistol (magazine ammo + reserve)
   const fire = () => {
     const g = gs.current;
     if (g.paused || !g.sim) return;
     const now = performance.now();
+    if (g.reloading && now < g.reloading) return;          // mid-reload
     if (now - g.gunTimer < GUN_COOLDOWN) return;
-    if (g.battery <= 0) { g.msg = 'BATTERY DEAD'; g.msgUntil = now + 1200; return; }
+    if (g.mag <= 0) {
+      // auto-reload if you have spare rounds, else click-empty
+      if (g.reserve > 0) reload();
+      else { g.msg = 'NO AMMO'; g.msgUntil = now + 1000; playGunSound(false, true); }
+      return;
+    }
     g.gunTimer = now;
-    g.battery = Math.max(0, g.battery - GUN_COST);
-    g.muzzle = now + 70;                       // brief muzzle flash
+    g.mag -= 1;
+    g.muzzle = now + 60;                                   // brief muzzle flash
+    setGunKick((n) => n + 1);                              // retrigger viewmodel recoil
     const hitRec = g.sim.damageAlongAim(g.player, GUN_DMG);
     playGunSound(!!hitRec);
     if (hitRec) {
@@ -92,6 +104,23 @@ export default function GameEngine({ onBackToTitle }) {
         playSting(hitRec.type);
       }
     }
+  };
+
+  // reload: pull from reserve into the magazine
+  const reload = () => {
+    const g = gs.current;
+    if (g.paused) return;
+    const now = performance.now();
+    if (g.reloading && now < g.reloading) return;
+    if (g.mag >= MAG_SIZE || g.reserve <= 0) return;
+    g.reloading = now + RELOAD_MS;
+    g.msg = 'RELOADING'; g.msgUntil = now + RELOAD_MS;
+    playRecordBeep(false);
+    setTimeout(() => {
+      const need = MAG_SIZE - g.mag;
+      const take = Math.min(need, g.reserve);
+      g.mag += take; g.reserve -= take; g.reloading = 0;
+    }, RELOAD_MS);
   };
 
   // main loop
@@ -156,11 +185,14 @@ export default function GameEngine({ onBackToTitle }) {
       else if (g.sanity > HEALTH_REGEN_ABOVE) g.health = Math.min(100, g.health + HEALTH_REGEN * sec);
       g.health = clamp(g.health, 0, 100);
 
-      // ---- pickups, battery ----
+      // ---- pickups ----
       for (const a of world.almondsNear(p.x, p.y, 4)) {
-        if (Math.hypot(a.x - p.x, a.y - p.y) < 0.6) { world.takeItem(a.id); g.almonds++; g.msg = 'ALMOND WATER ACQUIRED'; g.msgUntil = now + 2000; playPickupSound(); }
+        if (Math.hypot(a.x - p.x, a.y - p.y) < 0.6) {
+          world.takeItem(a.id); g.almonds++; g.reserve += AMMO_PICKUP;
+          g.msg = 'SUPPLIES: +1 WATER, +' + AMMO_PICKUP + ' AMMO'; g.msgUntil = now + 2200; playPickupSound();
+        }
       }
-      // battery: drains while recording; the gun also spends it; recharges slowly when idle
+      // battery now only powers the camera (the gun is a real firearm).
       if (recording) g.battery = Math.max(0, g.battery - dt * 0.004);
       else g.battery = Math.min(100, g.battery + dt * 0.0016);
 
@@ -174,7 +206,7 @@ export default function GameEngine({ onBackToTitle }) {
       if (canvas) {
         const ctx = canvas.getContext('2d');
         castRays(ctx, world, p, zone, 100 - g.sanity, g.sim.physical, g.flashlight, recording, {
-          muzzle: now < g.muzzle, hitFlash: now < g.hitFlash,
+          muzzle: now < g.muzzle, hitFlash: now < g.hitFlash, fov: g.settings.fov,
         });
         if (g.showMinimap) renderMinimap(ctx, world, p, g.sim.physical);
       }
@@ -184,7 +216,7 @@ export default function GameEngine({ onBackToTitle }) {
       if (uiAccum.current > 120) {
         uiAccum.current = 0;
         setSanityAudio(g.sanity);
-        setUi({ sanity: g.sanity, health: g.health, almonds: g.almonds, battery: g.battery, documented: { ...g.sim.killed }, zone: ZONE_NAMES[zone] || 'THE BACKROOMS', message: now < g.msgUntil ? g.msg : '' });
+        setUi({ sanity: g.sanity, health: g.health, almonds: g.almonds, battery: g.battery, mag: g.mag, reserve: g.reserve, reloading: g.reloading > now, firing: now < g.muzzle, documented: { ...g.sim.killed }, zone: ZONE_NAMES[zone] || 'THE BACKROOMS', message: now < g.msgUntil ? g.msg : '' });
       }
       rafRef.current = requestAnimationFrame(loop);
     };
@@ -205,6 +237,7 @@ export default function GameEngine({ onBackToTitle }) {
       if (k === 'f') { g.flashlight = !g.flashlight; setFlashlight(g.flashlight); }
       if (k === 'c') { g.camcorder = !g.camcorder; setCamcorder(g.camcorder); playRecordBeep(g.camcorder); }
       if (k === 'e' && g.almonds > 0) { g.almonds--; g.sanity = Math.min(100, g.sanity + 35); g.msg = 'SANITY RESTORED'; g.msgUntil = performance.now() + 1800; playPickupSound(); }
+      if (k === 'r') reload();
       if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(k)) e.preventDefault();
     };
     const up = (e) => { g.keys[e.key.toLowerCase()] = false; };
@@ -250,6 +283,7 @@ export default function GameEngine({ onBackToTitle }) {
     g.world = world; g.sim = sim;
     g.player = { x: sx + 0.5, y: sy + 0.5, angle: Math.random() * 6.28 }; g.px = g.player.x; g.py = g.player.y;
     g.sanity = 100; g.health = 100; g.almonds = 0; g.battery = 100; g.msg = ''; g.msgUntil = 0;
+    g.mag = MAG_SIZE; g.reserve = START_RESERVE; g.reloading = 0;
     g.paused = false; setPaused(false);
     setDeathCause(null); setRecInfo(null); setPhase('playing');
   };
@@ -282,8 +316,30 @@ export default function GameEngine({ onBackToTitle }) {
         </div>
       )}
 
+      {/* pistol viewmodel (recoils on each shot via the gunKick key) */}
+      {phase === 'playing' && !paused && (
+        <div key={gunKick} className="absolute pointer-events-none z-20 gun-recoil"
+          style={{ left: '50%', bottom: 0, width: 'min(260px, 42vw)', transform: 'translate(-50%, 14%)' }}>
+          <svg viewBox="0 0 200 140" style={{ width: '100%', display: 'block', filter: 'drop-shadow(0 -2px 6px rgba(0,0,0,0.7))' }}>
+            {/* hand */}
+            <path d="M70 140 L78 86 Q80 74 96 74 L120 74 Q132 74 132 88 L132 140 Z" fill="#7a6650" />
+            <path d="M70 140 L78 92 Q92 96 96 140 Z" fill="#6a5742" />
+            {/* slide / barrel */}
+            <rect x="86" y="50" width="92" height="20" rx="3" fill="#2b2b30" />
+            <rect x="86" y="50" width="92" height="6" rx="3" fill="#3c3c44" />
+            <rect x="170" y="54" width="8" height="12" fill="#1d1d22" />
+            {/* frame / grip */}
+            <path d="M96 68 L150 68 L150 78 Q150 86 140 90 L120 96 L108 122 Q104 132 94 130 L92 96 Q90 76 96 68 Z" fill="#222226" />
+            {/* trigger guard */}
+            <path d="M108 78 Q104 96 118 96 L130 96 Q120 80 108 78 Z" fill="none" stroke="#18181c" strokeWidth="3" />
+            {/* muzzle glow when firing */}
+            {ui.firing && <circle cx="182" cy="60" r="14" fill="rgba(255,228,150,0.85)" />}
+          </svg>
+        </div>
+      )}
+
       {phase === 'playing' && (
-        <HUD sanity={ui.sanity} health={ui.health} almonds={ui.almonds} documented={ui.documented} zoneName={ui.zone} flashlight={flashlight} camcorder={camcorder} message={ui.message} />
+        <HUD sanity={ui.sanity} health={ui.health} almonds={ui.almonds} documented={ui.documented} zoneName={ui.zone} flashlight={flashlight} camcorder={camcorder} message={ui.message} mag={ui.mag} reserve={ui.reserve} reloading={ui.reloading} />
       )}
       {phase === 'playing' && camcorder && <Camcorder battery={ui.battery} recInfo={recInfo} />}
 

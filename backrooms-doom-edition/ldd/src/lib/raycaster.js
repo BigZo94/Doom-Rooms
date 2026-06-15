@@ -9,14 +9,15 @@ export const SCREEN_WIDTH = 480;
 export const SCREEN_HEIGHT = 270;
 export const FOV = Math.PI / 3;          // 60°
 export const HALF_FOV = FOV / 2;
-export const MAX_DEPTH = 22;
+export const MAX_DEPTH = 32;
 
 const TEX = 64;                          // texture size (px)
-const PLANE_LEN = Math.tan(HALF_FOV);    // camera-plane half-length
-const WALL_HEIGHT = 3.6;                  // room height in world units (camera centred).
+const PLANE_LEN = Math.tan(HALF_FOV);    // camera-plane half-length (legacy default)
+const WALL_HEIGHT = 3.15;                 // room height in world units (camera centred).
                                          // walls + floor/ceiling row-distance scale by
                                          // this together, so the wall base stays glued
-                                         // to the floor — taller = more oppressive.
+                                         // to the floor — lower = less oppressive, more
+                                         // open. (was 3.6 — felt claustrophobic.)
 
 // ----------------------------------------------------------------------------
 //  Per-level palettes.  Level 0 = canonical Backrooms yellow.  Deeper levels
@@ -539,7 +540,12 @@ export function castRays(ctx, world, player, zoneIndex, dread, entities, flashli
 
   const posX = player.x, posY = player.y;
   const dirX = Math.cos(player.angle), dirY = Math.sin(player.angle);
-  const planeX = -dirY * PLANE_LEN, planeY = dirX * PLANE_LEN;
+  // FOV is dynamic (settings menu). A wider FOV pushes the walls back and makes
+  // the space read as larger / more open — important for the Backrooms feel,
+  // where tight walls kill the sense of endlessness. Default 90°.
+  const fovDeg = (fx && fx.fov) ? fx.fov : 90;
+  const planeLen = Math.tan((fovDeg * Math.PI / 180) / 2);
+  const planeX = -dirY * planeLen, planeY = dirX * planeLen;
 
   // dread colour push (toward red, away from cool)
   const dr = dread / 100;
@@ -590,7 +596,7 @@ export function castRays(ctx, world, player, zoneIndex, dread, entities, flashli
     let fy = posY + rowDist * rayY0;
 
     // distance shade (shared by floor & its mirrored ceiling)
-    let shade = 1 - rowDist * 0.058;
+    let shade = 1 - rowDist * 0.040;
     if (shade < 0) shade = 0;
     const floorShade = shade * 0.94 * flick;
     const ceilShade = shade * 1.04 * flick;
@@ -687,7 +693,7 @@ export function castRays(ctx, world, player, zoneIndex, dread, entities, flashli
     if (texX < 0) texX = 0; if (texX > TEX - 1) texX = TEX - 1;
 
     // distance shade + side darkening
-    let shade = 1 - perp * 0.055;
+    let shade = 1 - perp * 0.038;
     if (shade < 0.05) shade = 0.05;
     if (side === 1) shade *= 0.74;
     shade *= flick;
@@ -707,7 +713,7 @@ export function castRays(ctx, world, player, zoneIndex, dread, entities, flashli
     const texStep = TEX / lineH;
     let texPos = (drawS - halfH + (lineH >> 1)) * texStep;
     const wtex = tex.walls[cellVariant(mapX, mapY)];
-    const fAmt = 1 - (1 - perp * 0.055 < 0.05 ? 0.05 : 1 - perp * 0.055);
+    const fAmt = 1 - (1 - perp * 0.038 < 0.05 ? 0.05 : 1 - perp * 0.038);
 
     for (let y = drawS; y <= drawE; y++) {
       let ty = texPos & (TEX - 1);
@@ -758,10 +764,12 @@ export function castRays(ctx, world, player, zoneIndex, dread, entities, flashli
   // ---- weapon feedback ----
   if (fx) {
     if (fx.muzzle) {
-      // a brief warm flash blooming from the lower-centre (the gun)
-      const grad = ctx.createRadialGradient(W * 0.5, H * 0.74, 0, W * 0.5, H * 0.74, H * 0.6);
-      grad.addColorStop(0, 'rgba(255,236,180,0.55)');
-      grad.addColorStop(1, 'rgba(255,236,180,0)');
+      // a sharp, brief muzzle flash from the gun (lower-centre), tighter and
+      // whiter than the old flashlight bloom
+      const grad = ctx.createRadialGradient(W * 0.5, H * 0.82, 0, W * 0.5, H * 0.82, H * 0.38);
+      grad.addColorStop(0, 'rgba(255,244,210,0.7)');
+      grad.addColorStop(0.5, 'rgba(255,210,120,0.25)');
+      grad.addColorStop(1, 'rgba(255,210,120,0)');
       ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
     }
     if (fx.hitFlash) {
