@@ -5,8 +5,8 @@
 //  damp wallpaper, moist office carpet, dropped-ceiling tiles w/ fluorescents.
 // ============================================================================
 
-export const SCREEN_WIDTH = 480;
-export const SCREEN_HEIGHT = 270;
+export const SCREEN_WIDTH = 640;
+export const SCREEN_HEIGHT = 360;
 export const FOV = Math.PI / 3;          // 60°
 export const HALF_FOV = FOV / 2;
 export const MAX_DEPTH = 32;
@@ -139,7 +139,7 @@ function makeWallpaper(p, variant = 0) {
       let base = mix(p.wallLo, p.wallHi, 0.5 + (bl - 0.5) * 0.45);
       base = addc(base, (grain(x, y) - 0.5) * 9 + (rnd() - 0.5) * 5);
       base = scalec(base, 1 - (y / TEX) * 0.10);         // faint top-down light
-      if (bl > 0.72) base = mix(base, p.stain, (bl - 0.72) * 0.7);
+      if (bl > 0.6) base = mix(base, p.stain, (bl - 0.6) * 0.85);
 
       if (variant === 1) {
         const px0 = 27, py0 = TEX - 22, pw = 11, ph = 15;
@@ -164,13 +164,15 @@ function makeWallpaper(p, variant = 0) {
           if (!edge && ey % 3 === 0) base = scalec(metal, 0.55);
         }
       } else if (variant === 3) {
-        const cx = 30 + Math.sin(y * 0.18) * 4;
-        const w = 9 - (y / TEX) * 4;
-        const d = Math.abs(x - cx);
-        if (d < w) {
-          const t = (1 - d / w) * (0.25 + (y / TEX) * 0.5);
-          base = mix(base, p.stain, t * 0.8);
-          base = addc(base, -t * 22);
+        for (const sx of [30, 14]) {
+          const cx = sx + Math.sin(y * 0.18 + sx) * 5;
+          const w = 12 - (y / TEX) * 4;
+          const d = Math.abs(x - cx);
+          if (d < w) {
+            const t = (1 - d / w) * (0.3 + (y / TEX) * 0.55);
+            base = mix(base, p.stain, t * 0.9);
+            base = addc(base, -t * 30);
+          }
         }
       }
 
@@ -218,6 +220,7 @@ function makeCeiling(p) {
   const out = new Uint32Array(TEX * TEX);
   const rnd = mulberry32((0x5EED ^ (p.tile[0] * 7)) >>> 0);
   const speck = makeNoise(rnd, 32);
+  const stainN = makeNoise(rnd, 6);              // broad brown water stains
   const T = TEX / 4;                 // one acoustic tile = 16px = 1 world unit
   const fixtures = [[0, 0, 1, 2], [2, 1, 2, 1], [1, 3, 1, 1]];
   const inFixture = (tc, tr) => {
@@ -245,6 +248,8 @@ function makeCeiling(p) {
       } else {
         base = addc(p.tile.slice(), (speck(x, y) - 0.5) * 14);
         if (rnd() > 0.82) base = mix(base, p.grout, 0.3);
+        const st = stainN(x, y);                 // brown water stains, here and there
+        if (st > 0.62) { base = mix(base, p.stain, (st - 0.62) * 1.6); base = addc(base, -(st - 0.62) * 36); }
       }
       if ((lx === 0 || ly === 0) && !f) base = mix(base, p.grout, 0.75);
       out[y * TEX + x] = pack(base[0], base[1], base[2]);
@@ -523,19 +528,21 @@ let _tick = 0;
 function cellVariant(mx, my) {
   const h = (Math.imul(mx, 73856093) ^ Math.imul(my, 19349663)) >>> 0;
   const r = h % 100;
-  if (r < 70) return 0;   // clean wall (dominant)
-  if (r < 84) return 1;   // electrical outlet
-  if (r < 94) return 2;   // return vent
-  return 3;               // heavy water stain
+  if (r < 56) return 0;   // clean wall
+  if (r < 68) return 1;   // electrical outlet
+  if (r < 78) return 2;   // return vent
+  return 3;               // heavy water stain (~22% — stains here and there)
 }
 
 export function castRays(ctx, world, player, zoneIndex, dread, entities, flashlight = false, camcorder = false, fx = null) {
   _tick++;
   const W = SCREEN_WIDTH, H = SCREEN_HEIGHT, halfH = H >> 1;
-  // vertical look (pitch) shifts the horizon line up/down — a raycaster
-  // y-shear. Positive pitch looks up. Clamped so the world can't fully invert.
-  const pitch = (fx && fx.pitch) ? Math.max(-H * 0.6, Math.min(H * 0.6, fx.pitch)) : 0;
-  const horizon = (halfH + pitch) | 0;
+  // vertical look (mouse): shift the horizon up/down — classic raycaster y-shear.
+  const pitch = Math.max(-H * 0.9, Math.min(H * 0.9, (player.pitch || 0))) | 0;
+  const horizon = halfH + pitch;
+  // flashlight cone falloff, scaled to the render resolution so the cone keeps
+  // the same on-screen size regardless of SCREEN_HEIGHT.
+  const CK = 0.000085 * (270 / H) * (270 / H);
   const p = getPalette(zoneIndex);
   const tex = getTextures(zoneIndex);
 
@@ -586,62 +593,60 @@ export function castRays(ctx, world, player, zoneIndex, dread, entities, flashli
   // boost proportional to how dark the room is.
   const flashBoost = 1 + dk * 0.6;
 
-  // ---- floor + ceiling cast (per scanline, relative to the pitched horizon) -
+  // ---- floor + ceiling cast (per scanline below the horizon) -------------
   const rayX0 = dirX - planeX, rayY0 = dirY - planeY;  // leftmost ray
   const rayX1 = dirX + planeX, rayY1 = dirY + planeY;  // rightmost ray
   const floorTexF = tex.floor, ceilTexF = tex.ceil;
 
-  // FLOOR: every scanline below the horizon.
-  for (let y = Math.max(horizon + 1, 0); y < H; y++) {
-    const pRow = y - horizon;
-    if (pRow <= 0) continue;
-    const rowDist = (0.5 * H * WALL_HEIGHT) / pRow;
+  const maxRow = (Math.max(horizon, H - horizon) + 2) | 0;
+  for (let pRow = 1; pRow < maxRow; pRow++) {
+    const rowDist = (0.5 * H * WALL_HEIGHT) / pRow;          // distance of this row
     const stepX = rowDist * (rayX1 - rayX0) / W;
     const stepY = rowDist * (rayY1 - rayY0) / W;
-    let fx2 = posX + rowDist * rayX0;
-    let fy2 = posY + rowDist * rayY0;
-    let shade = 1 - rowDist * 0.040; if (shade < 0) shade = 0;
+    let fxw = posX + rowDist * rayX0;
+    let fyw = posY + rowDist * rayY0;
+
+    let shade = 1 - rowDist * 0.040;
+    if (shade < 0) shade = 0;
     const floorShade = shade * 0.94 * flick;
-    const rowFloor = y * W;
-    for (let x = 0; x < W; x++, fx2 += stepX, fy2 += stepY) {
-      let cfx = fx2 - Math.floor(fx2), cfy = fy2 - Math.floor(fy2);
-      let txF = (cfx * TEX) & (TEX - 1), tyF = (cfy * TEX) & (TEX - 1);
-      let fp = floorTexF[tyF * TEX + txF];
-      let bF = floorShade * ambient;
-      if (useFlash) {
-        const dxs = x - fcx, dys = y - fcy;
-        const coneF = 1.5 - (dxs * dxs + dys * dys) * 0.000085;
-        bF = (floorShade * 0.18 * ambient) + (coneF > 0 ? coneF : 0) * (1 - rowDist * 0.04 < 0 ? 0 : 1 - rowDist * 0.04) * 1.1 * flashBoost;
-      }
-      const fr = (fp & 0xFF) * bF, fg = ((fp >> 8) & 0xFF) * bF, fb = ((fp >> 16) & 0xFF) * bF;
-      buf[rowFloor + x] = pack(fr * rMul, fg * gMul, fb * bMul);
-    }
-  }
-  // CEILING: every scanline above the horizon.
-  for (let y = Math.min(horizon - 1, H - 1); y >= 0; y--) {
-    const pRow = horizon - y;
-    if (pRow <= 0) continue;
-    const rowDist = (0.5 * H * WALL_HEIGHT) / pRow;
-    const stepX = rowDist * (rayX1 - rayX0) / W;
-    const stepY = rowDist * (rayY1 - rayY0) / W;
-    let fx2 = posX + rowDist * rayX0;
-    let fy2 = posY + rowDist * rayY0;
-    let shade = 1 - rowDist * 0.040; if (shade < 0) shade = 0;
     const ceilShade = shade * 1.04 * flick;
-    const rowCeil = y * W;
-    for (let x = 0; x < W; x++, fx2 += stepX, fy2 += stepY) {
-      let hfx = fx2 * 0.25, hfy = fy2 * 0.25;
-      let chx = hfx - Math.floor(hfx), chy = hfy - Math.floor(hfy);
-      let txC = (chx * TEX) & (TEX - 1), tyC = (chy * TEX) & (TEX - 1);
-      let cp = ceilTexF[tyC * TEX + txC];
-      let bC = ceilShade * ambient;
+    const fAmt = 1 - shade;
+
+    const yF = horizon + pRow, yC = horizon - pRow;          // floor below, ceiling above the horizon
+    const okF = yF >= 0 && yF < H, okC = yC >= 0 && yC < H;
+    if (!okF && !okC) continue;
+    const rowFloor = yF * W, rowCeil = yC * W;
+
+    for (let x = 0; x < W; x++, fxw += stepX, fyw += stepY) {
+      const cfx = fxw - Math.floor(fxw), cfy = fyw - Math.floor(fyw);
+      const txF = (cfx * TEX) & (TEX - 1), tyF = (cfy * TEX) & (TEX - 1);
+      const fp = floorTexF[tyF * TEX + txF];
+      const hfx = fxw * 0.25, hfy = fyw * 0.25;
+      const chx = hfx - Math.floor(hfx), chy = hfy - Math.floor(hfy);
+      const txC = (chx * TEX) & (TEX - 1), tyC = (chy * TEX) & (TEX - 1);
+      const cp = ceilTexF[tyC * TEX + txC];
+
+      let bF = floorShade * ambient, bC = ceilShade * ambient;
       if (useFlash) {
-        const dxs = x - fcx, dys = y - fcy;
-        const coneC = 1.5 - (dxs * dxs + dys * dys) * 0.000085;
-        bC = (ceilShade * 0.18 * ambient) + (coneC > 0 ? coneC : 0) * (1 - rowDist * 0.04 < 0 ? 0 : 1 - rowDist * 0.04) * 1.1 * flashBoost;
+        const dxs = x - fcx, dysF = yF - fcy, dysC = yC - fcy;
+        const coneF = 1.5 - (dxs * dxs + dysF * dysF) * CK;
+        const coneC = 1.5 - (dxs * dxs + dysC * dysC) * CK;
+        bF = (floorShade * 0.18 * ambient) + (coneF > 0 ? coneF : 0) * shade * 1.1 * flashBoost;
+        bC = (ceilShade * 0.18 * ambient) + (coneC > 0 ? coneC : 0) * shade * 1.1 * flashBoost;
       }
-      const cr = (cp & 0xFF) * bC, cg = ((cp >> 8) & 0xFF) * bC, cb = ((cp >> 16) & 0xFF) * bC;
-      buf[rowCeil + x] = pack(cr * rMul, cg * gMul, cb * bMul);
+
+      if (okF) {
+        let r = (fp & 0xFF), g = (fp >> 8) & 0xFF, b = (fp >> 16) & 0xFF;
+        r *= bF; g *= bF; b *= bF;
+        r += (fog[0] - r) * fAmt * 0.7; g += (fog[1] - g) * fAmt * 0.7; b += (fog[2] - b) * fAmt * 0.7;
+        buf[rowFloor + x] = pack(r * rMul, g * gMul, b * bMul);
+      }
+      if (okC) {
+        let r2 = (cp & 0xFF), g2 = (cp >> 8) & 0xFF, b2 = (cp >> 16) & 0xFF;
+        r2 *= bC; g2 *= bC; b2 *= bC;
+        r2 += (fog[0] - r2) * fAmt * 0.7; g2 += (fog[1] - g2) * fAmt * 0.7; b2 += (fog[2] - b2) * fAmt * 0.7;
+        buf[rowCeil + x] = pack(r2 * rMul, g2 * gMul, b2 * bMul);
+      }
     }
   }
 
@@ -711,7 +716,7 @@ export function castRays(ctx, world, player, zoneIndex, dread, entities, flashli
     let cone = 1;
     if (useFlash) {
       const dxs = x - fcx;
-      cone = 1.45 - (dxs * dxs) * 0.000085;
+      cone = 1.45 - (dxs * dxs) * CK;
       if (cone < 0) cone = 0;
     }
 
@@ -728,7 +733,7 @@ export function castRays(ctx, world, player, zoneIndex, dread, entities, flashli
       let bri = shade * wallAmbient;
       if (useFlash) {
         const dys = y - fcy;
-        let c = cone - (dys * dys) * 0.000085;
+        let c = cone - (dys * dys) * CK;
         if (c < 0) c = 0;
         bri = (shade * 0.16 * wallAmbient) + c * (1 - perp * 0.05 < 0 ? 0 : 1 - perp * 0.05) * 1.1 * flashBoost;
       }
@@ -738,9 +743,15 @@ export function castRays(ctx, world, player, zoneIndex, dread, entities, flashli
     }
   }
 
+  // ---- furniture clipped into walls (static billboards, z-tested) --------
+  if (world.propsNear) {
+    const props = world.propsNear(posX, posY, 20);
+    if (props.length) drawProps(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, props, zBuf, horizon, ambient, flick);
+  }
+
   // ---- entities (billboards, z-tested, drawn far-to-near) ----------------
   if (entities && entities.length) {
-    drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, entities, zBuf, dread, flick, ambient, useFlash, flashBoost, fcx, fcy, horizon);
+    drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, entities, zBuf, dread, flick, ambient, useFlash, flashBoost, fcx, fcy, horizon, CK);
   }
 
   // ---- camcorder lens: a moderate barrel (fisheye) warp of the whole frame.
@@ -784,7 +795,58 @@ export function castRays(ctx, world, player, zoneIndex, dread, entities, flashli
   }
 }
 
-function drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, ents, zBuf, dread, flick, ambient = 1, useFlash = false, flashBoost = 1, fcx = W * 0.5, fcy = H * 0.55, horizon = H >> 1) {
+// ---- Furniture: simple shaded volumes that occasionally clip through walls.
+//  Drawn as z-tested billboards, so the half sitting inside a wall is hidden
+//  and only the part poking into the room shows — the "stuck in the wall"
+//  noclip look. type 0 chair .. 4 sofa.
+const FUR = [
+  { h: 0.95, w: 0.7, col: [122, 74, 44], legs: true },    // chair (wood)
+  { h: 0.80, w: 1.5, col: [96, 84, 72], legs: true },     // table
+  { h: 1.70, w: 1.1, col: [74, 64, 52], legs: false },    // shelf
+  { h: 1.90, w: 0.8, col: [86, 92, 102], legs: false },   // locker (metal)
+  { h: 0.85, w: 2.0, col: [58, 70, 92], legs: false },    // sofa (low, wide)
+];
+function drawProps(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, props, zBuf, horizon, ambient, flick) {
+  const invDet = 1 / (planeX * dirY - dirX * planeY);
+  const order = [];
+  for (const pr of props) {
+    const sx = pr.x - posX, sy = pr.y - posY;
+    const tY = invDet * (-planeY * sx + planeX * sy);
+    if (tY <= 0.25 || tY > 22) continue;
+    const tX = invDet * (dirY * sx - dirX * sy);
+    order.push({ pr, tX, tY });
+  }
+  order.sort((a, b) => b.tY - a.tY);
+  for (const { pr, tX, tY } of order) {
+    const F = FUR[((pr.type % 5) + 5) % 5];
+    const lineH = H * WALL_HEIGHT / tY;
+    const screenX = ((W / 2) * (1 + tX / tY)) | 0;
+    const floorY = (horizon + lineH / 2) | 0;
+    const ph = (lineH * F.h / WALL_HEIGHT) | 0;
+    const pw = (lineH * F.w / WALL_HEIGHT) | 0;
+    const top = floorY - ph, left = screenX - (pw >> 1);
+    const sh = Math.max(0.12, 1 - tY * 0.05) * flick * ambient;
+    for (let i = 0; i < pw; i++) {
+      const x = left + i;
+      if (x < 0 || x >= W) continue;
+      if (tY >= zBuf[x]) continue;                          // wall in front -> clipped (noclip look)
+      const u = i / pw, edge = i === 0 || i === pw - 1;
+      for (let yy = 0; yy < ph; yy++) {
+        const y = top + yy;
+        if (y < 0 || y >= H) continue;
+        const v = yy / ph;
+        if (F.legs && v > 0.45 && !(u < 0.16 || u > 0.84)) continue;   // leg gap
+        let lit = 1 - v * 0.45;
+        if (v < 0.06 && !F.legs) lit = 1.15;                 // top-slab highlight
+        let bri = sh * lit;
+        if (edge) bri *= 0.7;
+        buf[y * W + x] = pack(F.col[0] * bri, F.col[1] * bri, F.col[2] * bri, 255);
+      }
+    }
+  }
+}
+
+function drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, ents, zBuf, dread, flick, ambient = 1, useFlash = false, flashBoost = 1, fcx = W * 0.5, fcy = H * 0.55, horizon = H >> 1, ck = 0.000085) {
   const invDet = 1 / (planeX * dirY - dirX * planeY);
   // project + sort far -> near so nearer entities overdraw correctly
   const draw = [];
@@ -797,18 +859,15 @@ function drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, ents, z
   }
   draw.sort((a, b) => b.tY - a.tY);
 
-  const halfH = H >> 1;
   const dr = dread / 100;
   for (const { e, tX, tY } of draw) {
     const body = getBody(e.type);
     const screenX = ((W / 2) * (1 + tX / tY)) | 0;
-    // Monsters are large and looming. Uprights tower; the hound is big & wide.
-    const vscale = e.type === 'hound' ? 1.0 : 1.5;
-    // a slow per-entity sway so they breathe/loom instead of standing static
-    const sway = 1 + Math.sin(_tick * 0.05 + (e.id || 0) * 1.7) * 0.015;
-    const sH = (Math.abs(H / tY) * vscale * sway) | 0;
+    // hounds read low & wide; others tall
+    const vscale = e.type === 'hound' ? 0.72 : 1.06;
+    const sH = (Math.abs(H / tY) * vscale) | 0;
     const sW = (sH * SPR_W / SPR_H) | 0;
-    // sit feet near the floor line rather than centring on the horizon
+    // sit feet near the floor line (shifts with vertical look)
     const footY = horizon + (Math.abs(H / tY) * WALL_HEIGHT * 0.5) | 0;
     const drawStartY = footY - sH;
     const drawStartX = screenX - (sW >> 1);
@@ -818,7 +877,7 @@ function drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, ents, z
     // drawn afterwards and stay visible — a shape's eyes in the dark.)
     if (useFlash) {
       const dxs = screenX - fcx, dys = footY - (sH >> 1) - fcy;
-      let c = 1.45 - (dxs * dxs + dys * dys) * 0.000085;
+      let c = 1.45 - (dxs * dxs + dys * dys) * ck;
       if (c < 0) c = 0;
       shade *= Math.min(1.1, ambient + c * flashBoost);
     } else {
@@ -856,7 +915,7 @@ function drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, ents, z
     }
 
     // ---- glowing features per type ----
-    const eyeRed = aggro || e.dist < 7;        // glow red from farther = scarier
+    const eyeRed = aggro || e.dist < 4;
     const drawDot = (cxp, cyp, rad, col) => {
       const ex = (screenX + cxp * sW) | 0, ey = (drawStartY + cyp * sH) | 0;
       for (let oy = -rad; oy <= rad; oy++) for (let ox = -rad; ox <= rad; ox++) {
@@ -864,56 +923,29 @@ function drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, ents, z
         if (px >= 0 && px < W && py >= 0 && py < H && tY < zBuf[px]) buf[py * W + px] = col;
       }
     };
-    // a soft additive bloom around a glowing eye so it reads as a light source
-    // burning in the dark — the core scare of "eyes watching you".
-    const drawGlow = (cxp, cyp, rad, rc, gc, bc) => {
-      const ex = (screenX + cxp * sW) | 0, ey = (drawStartY + cyp * sH) | 0;
-      const r2 = rad * rad;
-      for (let oy = -rad; oy <= rad; oy++) for (let ox = -rad; ox <= rad; ox++) {
-        const d2 = ox * ox + oy * oy; if (d2 > r2) continue;
-        const px = ex + ox, py = ey + oy;
-        if (px < 0 || px >= W || py < 0 || py >= H || tY >= zBuf[px]) continue;
-        const f = (1 - d2 / r2) * 0.7;                 // falloff
-        const bg = buf[py * W + px];
-        const br = bg & 0xFF, bgc = (bg >> 8) & 0xFF, bb = (bg >> 16) & 0xFF;
-        buf[py * W + px] = pack(Math.min(255, br + rc * f), Math.min(255, bgc + gc * f), Math.min(255, bb + bc * f), 255);
-      }
-    };
-    const ew = Math.max(1, (sW * 0.045) | 0);          // bigger eyes
-    const glowR = Math.max(2, (sW * 0.13) | 0);
+    const ew = Math.max(0, (sW * 0.03) | 0);
     if (e.type === 'wanderer') {
-      // faceless — hollow eyes that catch the light when close
-      if (e.dist < 8) {
-        if (eyeRed) { drawGlow(-0.10, 0.12, glowR, 120, 12, 8); drawGlow(0.10, 0.12, glowR, 120, 12, 8); }
-        const c = eyeRed ? pack(255, 60, 40) : pack(170, 158, 120);
-        drawDot(-0.10, 0.12, ew, c); drawDot(0.10, 0.12, ew, c);
-      }
+      // faceless — faint hollow eyes only when close
+      if (e.dist < 6) { const c = pack(150, 140, 110); drawDot(-0.10, 0.12, ew, c); drawDot(0.10, 0.12, ew, c); }
     } else if (e.type === 'watcher') {
-      if (eyeRed) { drawGlow(-0.09, 0.10, glowR, 150, 14, 8); drawGlow(0.09, 0.10, glowR, 150, 14, 8); }
       const c = eyeRed ? pack(255, 40, 24) : pack(245, 210, 80);
       drawDot(-0.09, 0.10, ew, c); drawDot(0.09, 0.10, ew, c);
     } else if (e.type === 'smiler') {
-      const lit = 0.5 + (e.glow || 0) * 0.5;
-      drawGlow(0, 0.23, glowR * 1.4, 120 * lit, 130 * lit, 120 * lit);
-      const cEye = pack(235 * lit, 245 * lit, 235 * lit);
+      const lit = 0.4 + (e.glow || 0) * 0.6;
+      const cEye = pack(220 * lit, 235 * lit, 220 * lit);
       drawDot(-0.10, 0.20, ew, cEye); drawDot(0.10, 0.20, ew, cEye);
-      // wide jagged grin: a row of bright teeth, wider than before
-      const gy = (drawStartY + 0.27 * sH) | 0, gw = (sW * 0.30) | 0;
+      // wide grin: a row of bright teeth
+      const gy = (drawStartY + 0.27 * sH) | 0, gw = (sW * 0.22) | 0;
       const gx0 = screenX - (gw >> 1);
       for (let i = 0; i <= gw; i++) {
         const px = gx0 + i; if (px < 0 || px >= W || tY >= zBuf[px]) continue;
-        const teeth = (i % 3 === 0) ? 0.55 : 1;                  // jagged tooth gaps
-        const curve = Math.sin((i / gw) * Math.PI) * (sH * 0.045);
+        const teeth = (i % 3 === 0) ? 0.7 : 1;                   // tooth gaps
+        const curve = Math.sin((i / gw) * Math.PI) * (sH * 0.03);
         const py = (gy - curve) | 0;
-        // draw teeth a couple px tall so the grin has height
-        for (let th = 0; th < 2; th++) {
-          const yy = py + th;
-          if (yy >= 0 && yy < H) buf[yy * W + px] = pack(240 * lit * teeth, 245 * lit * teeth, 230 * lit * teeth);
-        }
+        if (py >= 0 && py < H) buf[py * W + px] = pack(235 * lit * teeth, 240 * lit * teeth, 225 * lit * teeth);
       }
     } else if (e.type === 'hound') {
-      drawGlow(0.12, 0.50, glowR, 160, 14, 6); drawGlow(0.20, 0.52, glowR, 160, 14, 6);
-      const c = pack(255, 40, 22);
+      const c = pack(255, 30, 18);
       drawDot(0.12, 0.50, Math.max(1, ew), c); drawDot(0.20, 0.52, Math.max(1, ew), c);  // forward-set eyes
     }
   }

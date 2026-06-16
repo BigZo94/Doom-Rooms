@@ -17,7 +17,14 @@
 // ============================================================================
 
 const CHUNK = 16;            // cells per chunk side
-const B = 7;                 // room block (6x6 room + shared wall)
+// ---- LAYOUT (tune for feel) ------------------------------------------------
+// MASSIVE open rooms joined by WIDE hallways, with random corridors cutting
+// across so the place feels like an endless noclipped void, not a tidy grid.
+const HALL_W = 4;            // hallway width in cells   (raise = WIDER halls)
+const ROOM = 24;             // room size between halls   (raise = BIGGER rooms /
+                             //                            LONGER straight runs)
+const P = HALL_W + ROOM;     // layout period (28): cross-corridors every P cells
+const B = P;                 // legacy alias for the room/zone period
 export const WALL = 1, FLOOR = 0;
 
 function hash2(x, y, salt = 0) {
@@ -28,29 +35,41 @@ function hash2(x, y, salt = 0) {
 const frac = (h) => (h >>> 8) / 16777216;
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
-// Deterministic, seamless geometry: rooms separated by 1-cell walls with
-// doorways, varied pillars, and occasional merged halls. Pure fn of coords.
+// Deterministic, seamless geometry: MASSIVE open rooms joined by wide hallways,
+// with random corridors carved straight across rooms (joining halls at odd
+// places) so the layout feels like an endless noclipped void. Pure fn of coords.
 function makeGeometry(S) {
-  const doorV = (bx, by) => 1 + (hash2(bx, by, S ^ 0x11) % 4);
-  const doorH = (bx, by) => 1 + (hash2(bx, by, S ^ 0x22) % 4);
-  const mergedV = (bx, by) => (hash2(bx, by, S ^ 0x33) % 100) < 15;
-  const mergedH = (bx, by) => (hash2(bx, by, S ^ 0x44) % 100) < 15;
-  const roomStyle = (bx, by) => hash2(bx, by, S ^ 0x55) % 4;
+  const doorH = (rcx, rcy) => 1 + (hash2(rcx, rcy, S ^ 0x11) % (ROOM - 3));
+  const doorV = (rcx, rcy) => 1 + (hash2(rcx, rcy, S ^ 0x22) % (ROOM - 3));
+  const roomStyle = (rcx, rcy) => hash2(rcx, rcy, S ^ 0x55) % 5;            // 0,1 open; 2 sparse; 3 grid; 4 mass
+  const openRoom = (rcx, rcy) => (hash2(rcx, rcy, S ^ 0x33) % 100) < 40;    // ~40%: walls gone -> merges into a huge space
+  // random branching corridors: a 2-wide lane cut straight across the room,
+  // punching through walls to join the hallways on either side.
+  const slotH = (rcx, rcy) => { const h = hash2(rcx, rcy, S ^ 0xA17); return (h % 100) < 50 ? 2 + (h >> 9) % (ROOM - 5) : -1; };
+  const slotV = (rcx, rcy) => { const h = hash2(rcx, rcy, S ^ 0xB28); return (h % 100) < 50 ? 2 + (h >> 9) % (ROOM - 5) : -1; };
   return function cellWall(gx, gy) {
     gx |= 0; gy |= 0;
-    const bx = Math.floor(gx / B), by = Math.floor(gy / B);
-    const lx = gx - bx * B, ly = gy - by * B;
-    const onV = lx === 0, onH = ly === 0;
-    if (onV && onH) return WALL;
-    if (onV) { if (mergedV(bx, by)) return FLOOR; const d = doorV(bx, by); return (ly === d || ly === d + 1) ? FLOOR : WALL; }
-    if (onH) { if (mergedH(bx, by)) return FLOOR; const d = doorH(bx, by); return (lx === d || lx === d + 1) ? FLOOR : WALL; }
-    const style = roomStyle(bx, by);
-    if (style === 0) return FLOOR;
-    if (style === 3) return (lx >= 3 && lx <= 4 && ly >= 3 && ly <= 4) ? WALL : FLOOR;
-    if (lx % 2 === 1 && ly % 2 === 1) {
-      if (style === 2) return WALL;
-      return (hash2(gx, gy, S ^ 0x66) % 100) < 55 ? WALL : FLOOR;
+    const px = ((gx % P) + P) % P, py = ((gy % P) + P) % P;
+    if (px < HALL_W || py < HALL_W) return FLOOR;                           // wide hallways
+    const rcx = Math.floor(gx / P), rcy = Math.floor(gy / P);
+    const rx = px - HALL_W, ry = py - HALL_W;                                // 0..ROOM-1 inside the room
+    // random corridors shooting across (carved through walls and all)
+    const sh = slotH(rcx, rcy); if (sh >= 0 && (ry === sh || ry === sh + 1)) return FLOOR;
+    const sv = slotV(rcx, rcy); if (sv >= 0 && (rx === sv || rx === sv + 1)) return FLOOR;
+    if (openRoom(rcx, rcy)) {                                               // MASSIVE open space, only a few columns
+      return (rx % 6 === 3 && ry % 6 === 3 && (hash2(gx, gy, S ^ 0x66) % 100) < 35) ? WALL : FLOOR;
     }
+    const onWall = rx === 0 || ry === 0 || rx === ROOM - 1 || ry === ROOM - 1;
+    if (onWall) {                                                          // wall ring w/ doorways onto the halls
+      const dh = doorH(rcx, rcy), dv = doorV(rcx, rcy);
+      if ((ry === 0 || ry === ROOM - 1) && (rx === dh || rx === dh + 1)) return FLOOR;
+      if ((rx === 0 || rx === ROOM - 1) && (ry === dv || ry === dv + 1)) return FLOOR;
+      return WALL;
+    }
+    const style = roomStyle(rcx, rcy);                                     // interior
+    if (style <= 1) return FLOOR;                                          // big empty room
+    if (style === 4) { const c = (ROOM - 1) >> 1; return (Math.abs(rx - c) <= 2 && Math.abs(ry - c) <= 2) ? WALL : FLOOR; }
+    if (rx % 5 === 2 && ry % 5 === 2) return style === 3 ? WALL : ((hash2(gx, gy, S ^ 0x77) % 100) < 45 ? WALL : FLOOR);
     return FLOOR;
   };
 }
@@ -155,33 +174,64 @@ export function createChunkManager(seed = (Math.random() * 1e9) | 0, opts = {}) 
   // ---- biomes / zones (palette + audio bed shift every ~40 cells) ----
   const ZONE = 40;
   const zoneAt = (gx, gy) => hash2(Math.floor(gx / ZONE), Math.floor(gy / ZONE), S ^ 0xABCD) % 6;
-  const isSafeRoom = (gx, gy) => (hash2(Math.floor(gx / B), Math.floor(gy / B), S ^ 0xCAFE) % 100) < 6;
+  const isSafeRoom = (gx, gy) => (hash2(Math.floor(gx / P), Math.floor(gy / P), S ^ 0xCAFE) % 100) < 6;
   // Dark rooms: ~16% of rooms have dead fluorescents (0 = lit .. 1 = pitch
-  // black). Safe rooms are always lit. Mirrors world.js darkness().
+  // black). Hallways always stay lit so you can navigate; only the set-back
+  // rooms go dark.
   function darkness(gx, gy) {
+    const px = ((gx % P) + P) % P, py = ((gy % P) + P) % P;
+    if (px < HALL_W || py < HALL_W) return 0;            // hallways stay lit
     if (isSafeRoom(gx, gy)) return 0;
-    const h = hash2(Math.floor(gx / B), Math.floor(gy / B), S ^ 0xDA12) % 100;
+    const h = hash2(Math.floor(gx / P), Math.floor(gy / P), S ^ 0xDA12) % 100;
     if (h >= 16) return 0;
     return 0.7 + (h / 16) * 0.3;
   }
 
-  function almondInRoom(bx, by) {
-    if (takenItems.has('al:' + bx + ',' + by)) return null;
-    if ((hash2(bx, by, S ^ 0x99) % 100) >= 12) return null;
-    const cx = bx * B + 3, cy = by * B + 3;
+  // almond water sits at the centre of ~12% of rooms
+  function almondInRoom(rcx, rcy) {
+    const id = 'al:' + rcx + ',' + rcy;
+    if (takenItems.has(id)) return null;
+    if ((hash2(rcx, rcy, S ^ 0x99) % 100) >= 12) return null;
+    const cx = rcx * P + HALL_W + (ROOM >> 1), cy = rcy * P + HALL_W + (ROOM >> 1);
     if (!isOpen(cx, cy)) return null;
-    return { x: cx + 0.5, y: cy + 0.5, id: 'al:' + bx + ',' + by };
+    return { x: cx + 0.5, y: cy + 0.5, id };
   }
   function almondsNear(px, py, rad = 26) {
     const out = [];
-    for (let bx = Math.floor((px - rad) / B); bx <= Math.floor((px + rad) / B); bx++)
-      for (let by = Math.floor((py - rad) / B); by <= Math.floor((py + rad) / B); by++) {
-        const a = almondInRoom(bx, by);
+    for (let rcx = Math.floor((px - rad) / P); rcx <= Math.floor((px + rad) / P); rcx++)
+      for (let rcy = Math.floor((py - rad) / P); rcy <= Math.floor((py + rad) / P); rcy++) {
+        const a = almondInRoom(rcx, rcy);
         if (a) out.push(a);
       }
     return out;
   }
   const takeItem = (id) => takenItems.add(id);
+
+  // ---- furniture: occasional pieces shoved into walls (the noclip glitch
+  // aesthetic). Deterministic; placed on an open cell hard against a wall and
+  // nudged INTO it so the billboard half-embeds. type 0..4.
+  function propsNear(px, py, rad = 22) {
+    const out = [];
+    for (let rcx = Math.floor((px - rad) / P); rcx <= Math.floor((px + rad) / P); rcx++)
+      for (let rcy = Math.floor((py - rad) / P); rcy <= Math.floor((py + rad) / P); rcy++) {
+        const h = hash2(rcx, rcy, S ^ 0xF00D);
+        const count = (h % 100) < 55 ? (1 + ((h >>> 7) % 2)) : 0;   // ~55% of rooms get 1-2 pieces
+        for (let i = 0; i < count; i++) {
+          const hh = hash2(rcx * 7 + i, rcy * 13 + 1, S ^ 0xBEEF);
+          const ex = HALL_W + 1 + (hh % (ROOM - 2));
+          const ey = HALL_W + 1 + ((hh >>> 8) % (ROOM - 2));
+          const gx = rcx * P + ex, gy = rcy * P + ey;
+          if (!isOpen(gx, gy)) continue;
+          let fx = gx, fy = gy, adj = false;
+          for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+            if (isWall(gx + dx, gy + dy)) { adj = true; fx = gx + dx * 0.45; fy = gy + dy * 0.45; break; }  // shove into the wall
+          }
+          if (!adj) continue;
+          out.push({ x: fx + 0.5, y: fy + 0.5, type: (hh >>> 16) % 5, id: rcx + ':' + rcy + ':' + i });
+        }
+      }
+    return out;
+  }
 
   function stats() {
     return { loadedChunks: chunks.size, queued: genQueue.length, overrides: overrides.size, generated: generatedCount, unloaded: unloadedCount };
@@ -199,7 +249,7 @@ export function createChunkManager(seed = (Math.random() * 1e9) | 0, opts = {}) 
   return {
     seed: S, BLOCK: B, CHUNK,
     update, isWall, isOpen, setCell, openCellNear,
-    zoneAt, isSafeRoom, darkness, almondsNear, takeItem,
+    zoneAt, isSafeRoom, darkness, almondsNear, takeItem, propsNear,
     stats, serialize, load,
   };
 }

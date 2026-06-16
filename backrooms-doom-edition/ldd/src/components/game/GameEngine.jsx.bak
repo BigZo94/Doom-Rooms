@@ -47,7 +47,7 @@ export default function GameEngine({ onBackToTitle }) {
   const canvasRef = useRef(null);
   const gs = useRef(null);
   if (!gs.current) gs.current = {
-    player: { x: 0.5, y: 0.5, angle: 0 }, world: null, sim: null, keys: {}, running: false,
+    player: { x: 0.5, y: 0.5, angle: 0, pitch: 0 }, world: null, sim: null, keys: {}, running: false,
     sanity: 100, health: 100, almonds: 0, battery: 100, flashlight: false, camcorder: false,
     showMinimap: false, stepTimer: 0, px: 0, py: 0, msg: '', msgUntil: 0,
     gunTimer: 0, muzzle: 0, hitFlash: 0, paused: false, settings: { ...DEFAULT_SETTINGS },
@@ -72,7 +72,7 @@ export default function GameEngine({ onBackToTitle }) {
     const { world, sim, sx, sy } = spawnWorld();
     const g = gs.current;
     g.world = world; g.sim = sim;
-    g.player = { x: sx + 0.5, y: sy + 0.5, angle: Math.random() * 6.28 };
+    g.player = { x: sx + 0.5, y: sy + 0.5, angle: Math.random() * 6.28, pitch: 0 };
     g.px = g.player.x; g.py = g.player.y;
     g.sanity = 100; g.health = 100; g.almonds = 0; g.battery = 100;
   }, []);
@@ -249,7 +249,13 @@ export default function GameEngine({ onBackToTitle }) {
   useEffect(() => {
     const canvas = canvasRef.current; if (!canvas) return;
     const g = gs.current;
-    const mm = (e) => { if (document.pointerLockElement === canvas && !g.paused) g.player.angle += e.movementX * 0.003 * g.settings.mouseSens; };
+    const mm = (e) => {
+      if (document.pointerLockElement === canvas && !g.paused) {
+        g.player.angle += e.movementX * 0.003 * g.settings.mouseSens;
+        // vertical look: clamp generously so you can crank up/down (raycaster y-shear)
+        g.player.pitch = Math.max(-300, Math.min(300, (g.player.pitch || 0) - e.movementY * 1.1 * g.settings.mouseSens));
+      }
+    };
     const mdown = (e) => {
       if (g.paused) return;
       if (document.pointerLockElement !== canvas) { canvas.requestPointerLock(); return; }
@@ -281,7 +287,7 @@ export default function GameEngine({ onBackToTitle }) {
     const g = gs.current;
     const { world, sim, sx, sy } = spawnWorld();
     g.world = world; g.sim = sim;
-    g.player = { x: sx + 0.5, y: sy + 0.5, angle: Math.random() * 6.28 }; g.px = g.player.x; g.py = g.player.y;
+    g.player = { x: sx + 0.5, y: sy + 0.5, angle: Math.random() * 6.28, pitch: 0 }; g.px = g.player.x; g.py = g.player.y;
     g.sanity = 100; g.health = 100; g.almonds = 0; g.battery = 100; g.msg = ''; g.msgUntil = 0;
     g.mag = MAG_SIZE; g.reserve = START_RESERVE; g.reloading = 0;
     g.paused = false; setPaused(false);
@@ -316,24 +322,40 @@ export default function GameEngine({ onBackToTitle }) {
         </div>
       )}
 
-      {/* pistol viewmodel (recoils on each shot via the gunKick key) */}
+      {/* pistol viewmodel — first-person, barrel pointing forward/up toward the
+          crosshair (recoils on each shot via the gunKick key) */}
       {phase === 'playing' && !paused && (
         <div key={gunKick} className="absolute pointer-events-none z-20 gun-recoil"
-          style={{ left: '50%', bottom: 0, width: 'min(260px, 42vw)', transform: 'translate(-50%, 14%)' }}>
-          <svg viewBox="0 0 200 140" style={{ width: '100%', display: 'block', filter: 'drop-shadow(0 -2px 6px rgba(0,0,0,0.7))' }}>
-            {/* hand */}
-            <path d="M70 140 L78 86 Q80 74 96 74 L120 74 Q132 74 132 88 L132 140 Z" fill="#7a6650" />
-            <path d="M70 140 L78 92 Q92 96 96 140 Z" fill="#6a5742" />
-            {/* slide / barrel */}
-            <rect x="86" y="50" width="92" height="20" rx="3" fill="#2b2b30" />
-            <rect x="86" y="50" width="92" height="6" rx="3" fill="#3c3c44" />
-            <rect x="170" y="54" width="8" height="12" fill="#1d1d22" />
-            {/* frame / grip */}
-            <path d="M96 68 L150 68 L150 78 Q150 86 140 90 L120 96 L108 122 Q104 132 94 130 L92 96 Q90 76 96 68 Z" fill="#222226" />
-            {/* trigger guard */}
-            <path d="M108 78 Q104 96 118 96 L130 96 Q120 80 108 78 Z" fill="none" stroke="#18181c" strokeWidth="3" />
-            {/* muzzle glow when firing */}
-            {ui.firing && <circle cx="182" cy="60" r="14" fill="rgba(255,228,150,0.85)" />}
+          style={{ left: '50%', bottom: 0, width: 'min(300px, 46vw)', transform: 'translate(-50%, 6%)' }}>
+          <svg viewBox="0 0 200 210" style={{ width: '100%', display: 'block', filter: 'drop-shadow(0 -3px 8px rgba(0,0,0,0.75))' }}>
+            <g transform="rotate(-5 100 150)">
+              {/* muzzle flash at the TOP (where the barrel points) when firing */}
+              {ui.firing && <circle cx="100" cy="38" r="20" fill="rgba(255,230,150,0.85)" />}
+              {ui.firing && <path d="M100 8 L108 36 L100 27 L92 36 Z M70 38 L97 44 L70 50 Z M130 38 L103 44 L130 50 Z M81 16 L98 38 L87 28 Z M119 16 L102 38 L113 28 Z" fill="rgba(255,245,205,0.92)" />}
+              {/* barrel bore */}
+              <ellipse cx="100" cy="44" rx="10" ry="4.5" fill="#0a0a0d" />
+              {/* slide / barrel: foreshortened, widening toward the viewer */}
+              <polygon points="89,44 111,44 122,150 78,150" fill="#2b2b31" />
+              <polygon points="96,44 104,44 105,150 95,150" fill="#3c3c45" />
+              {/* front + rear sights */}
+              <rect x="96" y="35" width="8" height="10" rx="1" fill="#1b1b1f" />
+              <rect x="86" y="144" width="28" height="9" rx="2" fill="#15151a" />
+              <rect x="98" y="144" width="4" height="9" fill="#000" />
+              {/* ejection port */}
+              <rect x="103" y="80" width="11" height="20" rx="2" fill="#161619" />
+              {/* frame / grip wedge down to the hands */}
+              <polygon points="78,150 122,150 130,178 146,205 54,205 70,178" fill="#212126" />
+              {/* trigger guard */}
+              <path d="M90 156 q-14 12 2 26 l9 0 q-16 -10 -3 -26 z" fill="#19191e" />
+              {/* hand wrapping the grip */}
+              <path d="M56 205 q-3 -28 16 -36 l56 0 q19 8 16 36 z" fill="#7c6850" />
+              <g fill="#6c5944">
+                <rect x="60" y="176" width="80" height="8" rx="4" />
+                <rect x="57" y="187" width="86" height="8" rx="4" />
+                <rect x="60" y="197" width="80" height="7" rx="4" />
+              </g>
+              <path d="M126 172 q22 8 18 30 l-11 0 q3 -18 -13 -24 z" fill="#74604a" />
+            </g>
           </svg>
         </div>
       )}
