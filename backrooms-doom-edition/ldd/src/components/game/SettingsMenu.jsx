@@ -40,6 +40,8 @@ export default function SettingsMenu({ settings, onChange, onResume, onQuit }) {
           fmt={(v) => `${v}\u00b0`} onChange={(v) => onChange('fov', v)} />
         <Row label="CROSSHAIR" value={settings.crosshair ? 1 : 0} min={0} max={1} step={1}
           fmt={(v) => (v ? 'ON' : 'OFF')} onChange={(v) => onChange('crosshair', !!v)} />
+        <Row label="INVERT LOOK Y" value={settings.invertY ? 1 : 0} min={0} max={1} step={1}
+          fmt={(v) => (v ? 'ON' : 'OFF')} onChange={(v) => onChange('invertY', !!v)} />
 
         <div style={{ display: 'flex', gap: 12, marginTop: 26 }}>
           <button onClick={onResume} style={btn(true)}>RESUME</button>

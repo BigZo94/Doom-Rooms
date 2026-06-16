@@ -532,6 +532,10 @@ function cellVariant(mx, my) {
 export function castRays(ctx, world, player, zoneIndex, dread, entities, flashlight = false, camcorder = false, fx = null) {
   _tick++;
   const W = SCREEN_WIDTH, H = SCREEN_HEIGHT, halfH = H >> 1;
+  // vertical look (pitch) shifts the horizon line up/down — a raycaster
+  // y-shear. Positive pitch looks up. Clamped so the world can't fully invert.
+  const pitch = (fx && fx.pitch) ? Math.max(-H * 0.6, Math.min(H * 0.6, fx.pitch)) : 0;
+  const horizon = (halfH + pitch) | 0;
   const p = getPalette(zoneIndex);
   const tex = getTextures(zoneIndex);
 
@@ -582,61 +586,62 @@ export function castRays(ctx, world, player, zoneIndex, dread, entities, flashli
   // boost proportional to how dark the room is.
   const flashBoost = 1 + dk * 0.6;
 
-  // ---- floor + ceiling cast (per scanline below the horizon) -------------
+  // ---- floor + ceiling cast (per scanline, relative to the pitched horizon) -
   const rayX0 = dirX - planeX, rayY0 = dirY - planeY;  // leftmost ray
   const rayX1 = dirX + planeX, rayY1 = dirY + planeY;  // rightmost ray
   const floorTexF = tex.floor, ceilTexF = tex.ceil;
 
-  for (let y = halfH + 1; y < H; y++) {
-    const pRow = y - halfH;
-    const rowDist = (0.5 * H * WALL_HEIGHT) / pRow;          // distance of this row
+  // FLOOR: every scanline below the horizon.
+  for (let y = Math.max(horizon + 1, 0); y < H; y++) {
+    const pRow = y - horizon;
+    if (pRow <= 0) continue;
+    const rowDist = (0.5 * H * WALL_HEIGHT) / pRow;
     const stepX = rowDist * (rayX1 - rayX0) / W;
     const stepY = rowDist * (rayY1 - rayY0) / W;
-    let fx = posX + rowDist * rayX0;
-    let fy = posY + rowDist * rayY0;
-
-    // distance shade (shared by floor & its mirrored ceiling)
-    let shade = 1 - rowDist * 0.040;
-    if (shade < 0) shade = 0;
+    let fx2 = posX + rowDist * rayX0;
+    let fy2 = posY + rowDist * rayY0;
+    let shade = 1 - rowDist * 0.040; if (shade < 0) shade = 0;
     const floorShade = shade * 0.94 * flick;
-    const ceilShade = shade * 1.04 * flick;
-
-    const yCeil = H - y - 1;
-    const rowFloor = y * W, rowCeil = yCeil * W;
-
-    for (let x = 0; x < W; x++, fx += stepX, fy += stepY) {
-      // ---- floor (carpet), tiled every world unit ----
-      let cfx = fx - Math.floor(fx), cfy = fy - Math.floor(fy);
+    const rowFloor = y * W;
+    for (let x = 0; x < W; x++, fx2 += stepX, fy2 += stepY) {
+      let cfx = fx2 - Math.floor(fx2), cfy = fy2 - Math.floor(fy2);
       let txF = (cfx * TEX) & (TEX - 1), tyF = (cfy * TEX) & (TEX - 1);
       let fp = floorTexF[tyF * TEX + txF];
-      // ---- ceiling (tiles+lights), tiled every 2 world units ----
-      let hfx = fx * 0.25, hfy = fy * 0.25;
+      let bF = floorShade * ambient;
+      if (useFlash) {
+        const dxs = x - fcx, dys = y - fcy;
+        const coneF = 1.5 - (dxs * dxs + dys * dys) * 0.000085;
+        bF = (floorShade * 0.18 * ambient) + (coneF > 0 ? coneF : 0) * (1 - rowDist * 0.04 < 0 ? 0 : 1 - rowDist * 0.04) * 1.1 * flashBoost;
+      }
+      const fr = (fp & 0xFF) * bF, fg = ((fp >> 8) & 0xFF) * bF, fb = ((fp >> 16) & 0xFF) * bF;
+      buf[rowFloor + x] = pack(fr * rMul, fg * gMul, fb * bMul);
+    }
+  }
+  // CEILING: every scanline above the horizon.
+  for (let y = Math.min(horizon - 1, H - 1); y >= 0; y--) {
+    const pRow = horizon - y;
+    if (pRow <= 0) continue;
+    const rowDist = (0.5 * H * WALL_HEIGHT) / pRow;
+    const stepX = rowDist * (rayX1 - rayX0) / W;
+    const stepY = rowDist * (rayY1 - rayY0) / W;
+    let fx2 = posX + rowDist * rayX0;
+    let fy2 = posY + rowDist * rayY0;
+    let shade = 1 - rowDist * 0.040; if (shade < 0) shade = 0;
+    const ceilShade = shade * 1.04 * flick;
+    const rowCeil = y * W;
+    for (let x = 0; x < W; x++, fx2 += stepX, fy2 += stepY) {
+      let hfx = fx2 * 0.25, hfy = fy2 * 0.25;
       let chx = hfx - Math.floor(hfx), chy = hfy - Math.floor(hfy);
       let txC = (chx * TEX) & (TEX - 1), tyC = (chy * TEX) & (TEX - 1);
       let cp = ceilTexF[tyC * TEX + txC];
-
-      let bF = floorShade * ambient, bC = ceilShade * ambient;
+      let bC = ceilShade * ambient;
       if (useFlash) {
-        const dxs = x - fcx, dys = y - fcy, dys2 = yCeil - fcy;
-        const coneF = 1.5 - (dxs * dxs + dys * dys) * 0.000085;
-        const coneC = 1.5 - (dxs * dxs + dys2 * dys2) * 0.000085;
-        bF = (floorShade * 0.18 * ambient) + (coneF > 0 ? coneF : 0) * shade * 1.1 * flashBoost;
-        bC = (ceilShade * 0.18 * ambient) + (coneC > 0 ? coneC : 0) * shade * 1.1 * flashBoost;
+        const dxs = x - fcx, dys = y - fcy;
+        const coneC = 1.5 - (dxs * dxs + dys * dys) * 0.000085;
+        bC = (ceilShade * 0.18 * ambient) + (coneC > 0 ? coneC : 0) * (1 - rowDist * 0.04 < 0 ? 0 : 1 - rowDist * 0.04) * 1.1 * flashBoost;
       }
-
-      // floor pixel
-      let r = (fp & 0xFF), g = (fp >> 8) & 0xFF, b = (fp >> 16) & 0xFF;
-      r = r * bF; g = g * bF; b = b * bF;
-      // fog blend toward murk at distance
-      const fAmt = 1 - shade;
-      r += (fog[0] - r) * fAmt * 0.7; g += (fog[1] - g) * fAmt * 0.7; b += (fog[2] - b) * fAmt * 0.7;
-      buf[rowFloor + x] = pack(r * rMul, g * gMul, b * bMul);
-
-      // ceiling pixel
-      let r2 = (cp & 0xFF), g2 = (cp >> 8) & 0xFF, b2 = (cp >> 16) & 0xFF;
-      r2 = r2 * bC; g2 = g2 * bC; b2 = b2 * bC;
-      r2 += (fog[0] - r2) * fAmt * 0.7; g2 += (fog[1] - g2) * fAmt * 0.7; b2 += (fog[2] - b2) * fAmt * 0.7;
-      buf[rowCeil + x] = pack(r2 * rMul, g2 * gMul, b2 * bMul);
+      const cr = (cp & 0xFF) * bC, cg = ((cp >> 8) & 0xFF) * bC, cb = ((cp >> 16) & 0xFF) * bC;
+      buf[rowCeil + x] = pack(cr * rMul, cg * gMul, cb * bMul);
     }
   }
 
@@ -673,8 +678,8 @@ export function castRays(ctx, world, player, zoneIndex, dread, entities, flashli
     zBuf[x] = perp;
 
     const lineH = (H * WALL_HEIGHT / perp) | 0;
-    let dStart = -(lineH >> 1) + halfH;
-    let dEnd = (lineH >> 1) + halfH;
+    let dStart = -(lineH >> 1) + horizon;
+    let dEnd = (lineH >> 1) + horizon;
     const drawS = dStart < 0 ? 0 : dStart;
     const drawE = dEnd >= H ? H - 1 : dEnd;
 
@@ -711,7 +716,7 @@ export function castRays(ctx, world, player, zoneIndex, dread, entities, flashli
     }
 
     const texStep = TEX / lineH;
-    let texPos = (drawS - halfH + (lineH >> 1)) * texStep;
+    let texPos = (drawS - horizon + (lineH >> 1)) * texStep;
     const wtex = tex.walls[cellVariant(mapX, mapY)];
     const fAmt = 1 - (1 - perp * 0.038 < 0.05 ? 0.05 : 1 - perp * 0.038);
 
@@ -735,7 +740,7 @@ export function castRays(ctx, world, player, zoneIndex, dread, entities, flashli
 
   // ---- entities (billboards, z-tested, drawn far-to-near) ----------------
   if (entities && entities.length) {
-    drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, entities, zBuf, dread, flick, ambient, useFlash, flashBoost, fcx, fcy);
+    drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, entities, zBuf, dread, flick, ambient, useFlash, flashBoost, fcx, fcy, horizon);
   }
 
   // ---- camcorder lens: a moderate barrel (fisheye) warp of the whole frame.
@@ -779,7 +784,7 @@ export function castRays(ctx, world, player, zoneIndex, dread, entities, flashli
   }
 }
 
-function drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, ents, zBuf, dread, flick, ambient = 1, useFlash = false, flashBoost = 1, fcx = W * 0.5, fcy = H * 0.55) {
+function drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, ents, zBuf, dread, flick, ambient = 1, useFlash = false, flashBoost = 1, fcx = W * 0.5, fcy = H * 0.55, horizon = H >> 1) {
   const invDet = 1 / (planeX * dirY - dirX * planeY);
   // project + sort far -> near so nearer entities overdraw correctly
   const draw = [];
@@ -804,7 +809,7 @@ function drawEntities(buf, W, H, posX, posY, dirX, dirY, planeX, planeY, ents, z
     const sH = (Math.abs(H / tY) * vscale * sway) | 0;
     const sW = (sH * SPR_W / SPR_H) | 0;
     // sit feet near the floor line rather than centring on the horizon
-    const footY = halfH + (Math.abs(H / tY) * WALL_HEIGHT * 0.5) | 0;
+    const footY = horizon + (Math.abs(H / tY) * WALL_HEIGHT * 0.5) | 0;
     const drawStartY = footY - sH;
     const drawStartX = screenX - (sW >> 1);
     let shade = Math.max(0.16, 1 - tY * 0.07) * (0.85 + flick * 0.15);

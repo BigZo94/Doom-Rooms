@@ -191,8 +191,40 @@ canvas {
 .entity-flash { animation: entityFlash 0.8s ease forwards; }
 
 @keyframes gunRecoil {
-  0%   { transform: translate(-50%, 14%); }
-  18%  { transform: translate(-50%, 38%) rotate(-2deg); }
-  100% { transform: translate(-50%, 14%); }
+  0%   { transform: translateY(0); }
+  18%  { transform: translateY(18%) rotate(-2deg); }
+  100% { transform: translateY(0); }
 }
 .gun-recoil { animation: gunRecoil 0.16s ease-out; }
+
+/* weapon bob/sway — the gun "moves up and down" as you live and walk */
+@keyframes gunIdle {
+  0%,100% { transform: translateY(0) translateX(0); }
+  50%     { transform: translateY(1.2%) translateX(0.4%); }
+}
+@keyframes gunBob {
+  0%   { transform: translateY(0) translateX(-1.5%); }
+  25%  { transform: translateY(3.5%) translateX(0); }
+  50%  { transform: translateY(0) translateX(1.5%); }
+  75%  { transform: translateY(3.5%) translateX(0); }
+  100% { transform: translateY(0) translateX(-1.5%); }
+}
+@keyframes gunBobFast {
+  0%   { transform: translateY(0) translateX(-2.5%) rotate(-0.5deg); }
+  25%  { transform: translateY(5.5%) translateX(0) rotate(0deg); }
+  50%  { transform: translateY(0) translateX(2.5%) rotate(0.5deg); }
+  75%  { transform: translateY(5.5%) translateX(0) rotate(0deg); }
+  100% { transform: translateY(0) translateX(-2.5%) rotate(-0.5deg); }
+}
+.gun-idle { animation: gunIdle 4s ease-in-out infinite; }
+.gun-bob { animation: gunBob 0.7s ease-in-out infinite; }
+.gun-bob-fast { animation: gunBobFast 0.5s ease-in-out infinite; }
+
+/* reload: the weapon dips down out of view and comes back up */
+@keyframes gunReload {
+  0%   { transform: translateY(0) rotate(0deg); }
+  25%  { transform: translateY(80%) rotate(-10deg); }
+  70%  { transform: translateY(80%) rotate(-10deg); }
+  100% { transform: translateY(0) rotate(0deg); }
+}
+.gun-reload { animation: gunReload 1.3s ease-in-out; }
