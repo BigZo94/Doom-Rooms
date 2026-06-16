@@ -1,0 +1,198 @@
+@import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 20 10% 4%;
+    --foreground: 60 30% 80%;
+    --card: 20 10% 6%;
+    --card-foreground: 60 30% 80%;
+    --popover: 20 10% 6%;
+    --popover-foreground: 60 30% 80%;
+    --primary: 52 55% 56%;
+    --primary-foreground: 20 10% 4%;
+    --secondary: 20 10% 10%;
+    --secondary-foreground: 60 30% 80%;
+    --muted: 20 10% 10%;
+    --muted-foreground: 60 20% 50%;
+    --accent: 52 55% 40%;
+    --accent-foreground: 20 10% 4%;
+    --destructive: 0 75% 45%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 52 20% 20%;
+    --input: 52 20% 20%;
+    --ring: 52 55% 56%;
+    --radius: 0px;
+    --font-heading: 'Press Start 2P', monospace;
+    --font-body: 'Press Start 2P', monospace;
+    --font-display: 'Press Start 2P', monospace;
+    --font-mono: 'Press Start 2P', monospace;
+
+    --yellow-wall: #C8B560;
+    --yellow-dark: #7A6E30;
+    --yellow-mid: #A89A3E;
+    --floor-color: #1a1608;
+    --ceiling-color: #0a0a0a;
+    --entity-red: #CC2200;
+  }
+
+  .dark {
+    --background: 20 10% 4%;
+    --foreground: 60 30% 80%;
+    --card: 20 10% 6%;
+    --card-foreground: 60 30% 80%;
+    --popover: 20 10% 6%;
+    --popover-foreground: 60 30% 80%;
+    --primary: 52 55% 56%;
+    --primary-foreground: 20 10% 4%;
+    --secondary: 20 10% 10%;
+    --secondary-foreground: 60 30% 80%;
+    --muted: 20 10% 10%;
+    --muted-foreground: 60 20% 50%;
+    --accent: 52 55% 40%;
+    --accent-foreground: 20 10% 4%;
+    --destructive: 0 75% 45%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 52 20% 20%;
+    --input: 52 20% 20%;
+    --ring: 52 55% 56%;
+    --sidebar-background: 20 10% 4%;
+    --sidebar-foreground: 60 30% 80%;
+    --sidebar-primary: 52 55% 56%;
+    --sidebar-primary-foreground: 20 10% 4%;
+    --sidebar-accent: 20 10% 10%;
+    --sidebar-accent-foreground: 60 30% 80%;
+    --sidebar-border: 52 20% 20%;
+    --sidebar-ring: 52 55% 56%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground font-body;
+    overflow: hidden;
+    margin: 0;
+    padding: 0;
+  }
+}
+
+/* Pixel rendering */
+canvas {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+/* Scanline overlay */
+.scanlines::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, 0.18) 2px,
+    rgba(0, 0, 0, 0.18) 4px
+  );
+  pointer-events: none;
+  z-index: 10;
+}
+
+/* Vignette */
+.vignette::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at center, transparent 40%, rgba(0,0,0,0.85) 100%);
+  pointer-events: none;
+  z-index: 11;
+}
+
+/* Pixel font global */
+.font-pixel {
+  font-family: 'Press Start 2P', monospace;
+}
+
+/* Flicker animation */
+@keyframes flicker {
+  0%, 100% { opacity: 1; }
+  10% { opacity: 0.85; }
+  20% { opacity: 1; }
+  50% { opacity: 0.9; }
+  55% { opacity: 0.6; }
+  56% { opacity: 1; }
+  80% { opacity: 0.95; }
+  85% { opacity: 0.7; }
+  90% { opacity: 1; }
+}
+
+@keyframes glitch {
+  0% { transform: translate(0); clip-path: none; }
+  10% { transform: translate(-2px, 1px); clip-path: polygon(0 15%, 100% 15%, 100% 30%, 0 30%); }
+  20% { transform: translate(2px, -1px); clip-path: none; }
+  30% { transform: translate(0); }
+  60% { transform: translate(1px, 0); clip-path: polygon(0 60%, 100% 60%, 100% 75%, 0 75%); }
+  70% { transform: translate(-1px, 0); clip-path: none; }
+  100% { transform: translate(0); }
+}
+
+@keyframes pulse-red {
+  0%, 100% { text-shadow: 0 0 8px #CC2200, 0 0 20px #CC220066; }
+  50% { text-shadow: 0 0 4px #CC2200; }
+}
+
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+@keyframes screenDistort {
+  0% { filter: none; }
+  10% { filter: hue-rotate(90deg) saturate(3) brightness(1.5); transform: skewX(2deg); }
+  11% { filter: none; transform: none; }
+  40% { filter: none; }
+  41% { filter: hue-rotate(180deg) saturate(5) brightness(0.7); transform: skewX(-1deg) translateX(3px); }
+  42% { filter: none; transform: none; }
+  100% { filter: none; }
+}
+
+.animate-flicker { animation: flicker 3s infinite; }
+.animate-glitch { animation: glitch 2s infinite; }
+.animate-pulse-red { animation: pulse-red 2s infinite; }
+.animate-fade-in-up { animation: fadeInUp 0.5s ease forwards; }
+.animate-blink { animation: blink 1s step-end infinite; }
+.animate-screen-distort { animation: screenDistort 4s infinite; }
+
+/* HUD dread bar */
+.dread-bar-fill {
+  transition: width 0.3s ease;
+  background: linear-gradient(90deg, #3a8a00, #a0c020, #e0e000, #e08000, #cc2200);
+}
+
+/* Entity flash overlay */
+@keyframes entityFlash {
+  0% { opacity: 0; }
+  10% { opacity: 0.8; }
+  30% { opacity: 0.6; }
+  50% { opacity: 0.9; }
+  100% { opacity: 0; }
+}
+.entity-flash { animation: entityFlash 0.8s ease forwards; }
+
+@keyframes gunRecoil {
+  0%   { transform: translate(-50%, 14%); }
+  18%  { transform: translate(-50%, 38%) rotate(-2deg); }
+  100% { transform: translate(-50%, 14%); }
+}
+.gun-recoil { animation: gunRecoil 0.16s ease-out; }
